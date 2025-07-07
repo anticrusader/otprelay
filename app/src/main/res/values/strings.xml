@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">OTP Relay</string>
+    <string name="disclaimer_text">M.M. OTP Bridge</string>
+</resources>
