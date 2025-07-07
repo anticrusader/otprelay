@@ -64,10 +64,17 @@ class OTPNotificationListener : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         try {
+            val packageName = sbn.packageName
+
+            // NEW: Ignore notifications from our own app to prevent feedback loop
+            if (packageName == applicationContext.packageName) {
+                Log.d(TAG, "OTPNotificationListener: Skipping notification from self ($packageName).")
+                return
+            }
+
             val notification = sbn.notification
             val extras = notification.extras
 
-            val packageName = sbn.packageName
             val postTime = sbn.postTime
             val currentTime = System.currentTimeMillis()
 

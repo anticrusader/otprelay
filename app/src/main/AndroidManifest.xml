@@ -5,6 +5,8 @@
     <!-- SMS permissions -->
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
     <uses-permission android:name="android.permission.READ_SMS" />
+    <!-- Required for sending SMS if your app were to send replies or forwards directly -->
+    <uses-permission android:name="android.permission.SEND_SMS" />
 
     <!-- Network permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -30,7 +32,13 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.OTPRelay"
-        tools:targetApi="31">
+        tools:targetApi="31"
+        tools:replace="android:allowBackup,android:dataExtractionRules,android:fullBackupContent,android:icon,android:label,android:roundIcon,android:supportsRtl,android:theme">
+
+        <!-- Declare the default SMS app component -->
+        <!-- This meta-data entry is specifically looked for by some OEMs -->
+        <meta-data android:name="android.telephony.DEFAULT_SMS_APP"
+            android:value="com.example.otprelay.MainActivity" />
 
         <!-- Main Activity: Entry point for the user interface -->
         <activity
@@ -40,6 +48,18 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+                <!-- Explicitly declare as a messaging app category -->
+                <category android:name="android.intent.category.APP_MESSAGING" />
+            </intent-filter>
+            <!-- Intent filter to make MainActivity capable of handling SENDTO for SMS/MMS -->
+            <!-- This is crucial for being a default SMS app -->
+            <intent-filter>
+                <action android:name="android.intent.action.SENDTO" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="sms" />
+                <data android:scheme="smsto" />
+                <data android:scheme="mms" />
+                <data android:scheme="mmsto" />
             </intent-filter>
         </activity>
 
@@ -57,15 +77,26 @@
             android:foregroundServiceType="dataSync" />
 
         <!-- SMS Receiver: Listens for incoming SMS broadcasts -->
-        <!-- Removed android:permission="android.permission.BROADCAST_SMS" as it's incorrect for receiving -->
-        <!-- Removed android:priority as it can interfere with other apps and is often not needed on modern Android -->
         <receiver
             android:name=".SMSReceiver"
             android:enabled="true"
             android:exported="true"
-            android:directBootAware="true">
+            android:directBootAware="true"
+            android:permission="android.permission.BROADCAST_SMS"> <!-- NEW: Added BROADCAST_SMS permission -->
+            <!-- Action for receiving SMS (already present) -->
             <intent-filter>
                 <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+            <!-- REQUIRED for being a default SMS app - receives SMS messages -->
+            <intent-filter android:priority="2147483647"> <!-- Set a high priority to ensure it's preferred by the system -->
+                <action android:name="android.provider.Telephony.SMS_DELIVER" />
+                <data android:scheme="sms" />
+                <data android:mimeType="vnd.android-dir/mms-sms" />
+            </intent-filter>
+            <!-- REQUIRED for being a default SMS app - receives WAP Push messages (MMS) -->
+            <intent-filter android:priority="2147483647"> <!-- Max priority -->
+                <action android:name="android.provider.Telephony.WAP_PUSH_DELIVER" />
+                <data android:mimeType="application/vnd.wap.mms-message" />
             </intent-filter>
         </receiver>
 
