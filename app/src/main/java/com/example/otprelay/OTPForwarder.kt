@@ -1,4 +1,3 @@
-// OTPForwarder.kt
 package com.example.otprelay
 
 import android.app.NotificationChannel
@@ -58,6 +57,9 @@ object OTPForwarder {
             // Add more specific service mappings here if needed.
             // Example: if "Easypaisa" appears as a title and from a specific number:
             // lowerCaseSender.contains("easypaisa") || lowerCaseSender.contains("specific_easypaisa_number_digits") -> "easypaisa_service_id"
+            // Adding a specific rule for "Adnan" and "03105697413" based on your screenshot
+            lowerCaseSender.contains("adnan") || lowerCaseSender.contains("03105697413") -> "adnan_sms_service"
+
 
             // 1. Fallback to extracting phone number if not caught by explicit mapping
             // This regex must be robust to catch various phone number formats.
@@ -111,25 +113,56 @@ object OTPForwarder {
 
         // Dynamically build regex patterns with configurable digit length
         val dynamicRegexes = Constants.OTP_REGEX_PATTERNS_TO_GENERATE.map { patternString ->
-            // Replace the custom placeholder with the actual length range
             val finalPatternString = patternString.replace("{LENGTH_PLACEHOLDER}", lengthRange)
             Regex(finalPatternString, RegexOption.IGNORE_CASE)
         }
 
         // Combine dynamic patterns with any fixed-length specific patterns
-        val allPatterns = dynamicRegexes + Constants.OTP_FIXED_LENGTH_REGEX_PATTERNS
+        // Order of concatenation matters: specific fixed patterns might be more accurate.
+        val allPatterns = Constants.OTP_FIXED_LENGTH_REGEX_PATTERNS + dynamicRegexes
 
         for (regex in allPatterns) {
             val matchResult = regex.find(messageBody)
             if (matchResult != null && matchResult.groupValues.size > 1) {
                 val otp = matchResult.groupValues[1]
-                // Add an additional check to ensure the extracted OTP matches the min/max length
-                if (otp.length in minLength..maxLength) {
-                    Log.d(TAG, "OTP extracted: '$otp' using pattern: '${regex.pattern}' from message: '$messageBody'")
-                    return otp
-                } else {
-                    Log.d(TAG, "Skipping extracted string '$otp' from message: '$messageBody' as it does not meet length criteria ($minLength-$maxLength). Pattern: '${regex.pattern}'")
+
+                // Validate OTP length
+                if (otp.length !in minLength..maxLength) {
+                    Log.d(TAG, "Skipping extracted string '$otp' as it does not meet length criteria ($minLength-$maxLength). Pattern: '${regex.pattern}'. Message: '$messageBody'")
+                    continue // Try next regex if length does not match
                 }
+
+                // *** CRUCIAL HEURISTIC: Check if the extracted OTP is likely a phone number instead ***
+                // This aims to prevent false positives when a phone number looks like an OTP
+                val lowerCaseMessage = messageBody.lowercase(Locale.getDefault())
+
+                // Conditions for likely a phone number
+                val isLikelyPhoneNumber = when (otp.length) {
+                    // Typical lengths for local phone numbers (e.g., 7 digits like 5697413)
+                    // Check if it starts with common mobile network prefixes if applicable to your region
+                    7 -> (lowerCaseMessage.contains("0310") || lowerCaseMessage.contains("0300") || lowerCaseMessage.contains("0333")) && lowerCaseMessage.contains(otp) // Example: 03XX YYYYYYY
+                    // General check for longer numbers that might be full international numbers without specific country codes
+                    in 10..15 -> lowerCaseMessage.contains(otp) // If it's a long number and directly present
+                    else -> false
+                }
+
+                // Conditions for strong OTP keywords near the extracted number
+                val strongOtpKeywords = listOf("otp", "code", "pin", "verify", "verification", "passcode", "login", "access")
+                val isStronglyContextualizedAsOtp = strongOtpKeywords.any {
+                    // Check if the keyword is within a reasonable proximity of the extracted OTP
+                    val regexWithContext = Regex("($it\\s*[:is]*\\s*$otp|$otp\\s*(?:is your|$it)\\b)", RegexOption.IGNORE_CASE)
+                    regexWithContext.containsMatchIn(lowerCaseMessage)
+                }
+
+                // If it looks like a phone number AND it's NOT strongly contextualized as an OTP, skip it.
+                if (isLikelyPhoneNumber && !isStronglyContextualizedAsOtp) {
+                    Log.d(TAG, "Skipping '$otp' (length ${otp.length}) from message: '$messageBody'. It looks like a phone number and lacks strong OTP context. Pattern: '${regex.pattern}'")
+                    continue // Continue to the next regex
+                }
+
+                // If we reach here, it's either not a likely phone number or it has strong OTP context.
+                Log.d(TAG, "OTP extracted: '$otp' using pattern: '${regex.pattern}' from message: '$messageBody'")
+                return otp
             }
         }
         Log.d(TAG, "No OTP found in message: '$messageBody'")

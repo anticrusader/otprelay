@@ -53,28 +53,38 @@ object Constants {
     // IMPORTANT: Replace with your actual Make.com webhook URL
     const val MAKE_WEBHOOK_URL = "YOUR_MAKE_WEBHOOK_URL_HERE"
 
-    // OTP Regex Patterns
-    // Use {LENGTH_PLACEHOLDER} to indicate where the dynamic length will go
+    // Regex patterns for OTP extraction
+    // These patterns will have {LENGTH_PLACEHOLDER} replaced with the actual length range.
+    // Order matters: More specific patterns should come before more generic ones.
     val OTP_REGEX_PATTERNS_TO_GENERATE = listOf(
-        "(\\d{LENGTH_PLACEHOLDER}) is your OTP",
-        "OTP is (\\d{LENGTH_PLACEHOLDER})",
-        "Your OTP is (\\d{LENGTH_PLACEHOLDER})",
-        "(\\d{LENGTH_PLACEHOLDER}) is your verification code",
-        "verification code is (\\d{LENGTH_PLACEHOLDER})",
+        // Strongest patterns: look for explicit OTP keywords right before or after the digits
+        "\\b(?:OTP|Code|Pin|Verification|Verify|Passcode|Login|Access)\\s*[:is]*\\s*(\\d{LENGTH_PLACEHOLDER})\\b", // e.g., "OTP: 123456", "Code is 123456"
+        "\\b(\\d{LENGTH_PLACEHOLDER})\\s*(?:is your|is the|is your verification|is your login|otp|code|pin|verif|authenticate)\\b", // e.g., "123456 is your OTP"
+        "Your OTP is\\s*(\\d{LENGTH_PLACEHOLDER})\\b",
+        "Verification Code:\\s*(\\d{LENGTH_PLACEHOLDER})\\b",
+        "Pin code:\\s*(\\d{LENGTH_PLACEHOLDER})\\b",
         "Use (\\d{LENGTH_PLACEHOLDER}) to verify",
-        "Code: (\\d{LENGTH_PLACEHOLDER})",
-        "PIN: (\\d{LENGTH_PLACEHOLDER})",
-        "\\b(\\d{LENGTH_PLACEHOLDER})\\b" // Word boundaries for standalone numbers
+        "Code:\\s*(\\d{LENGTH_PLACEHOLDER})",
+        "PIN:\\s*(\\d{LENGTH_PLACEHOLDER})",
+        "OTP\\s+(\\d{LENGTH_PLACEHOLDER})",
+        "is (\\d{LENGTH_PLACEHOLDER})", // More generic, but requires very careful handling in `extractOtpFromMessage`
+
+        // Generic patterns (use with caution, as they are prone to false positives like phone numbers)
+        // This is the most generic. If this pattern often catches phone numbers, you might need to remove it
+        // or add stronger context checks in extractOtpFromMessage.
+        // For now, rely on the `isPhoneNumberLikely` check in `extractOtpFromMessage`.
+        "\\b(\\d{LENGTH_PLACEHOLDER})\\b" // Standalone digits with word boundaries
     )
 
-    // These are specific, fixed-length patterns that don't need dynamic length
+    // Fixed-length specific regex patterns (for very specific known services)
     val OTP_FIXED_LENGTH_REGEX_PATTERNS = listOf(
         Regex("(\\d{6}) is your Google verification code", RegexOption.IGNORE_CASE),
         Regex("Your Amazon OTP is (\\d{6})", RegexOption.IGNORE_CASE),
         Regex("Your PayPal verification code is (\\d{6})", RegexOption.IGNORE_CASE),
         Regex("(\\d{4}) is your code for WhatsApp", RegexOption.IGNORE_CASE),
         Regex("(\\d{6}) is your code for JazzCash", RegexOption.IGNORE_CASE),
-        Regex("(\\d{6}) is your code for EasyPaisa", RegexOption.IGNORE_CASE)
+        Regex("(\\d{6}) is your code for EasyPaisa", RegexOption.IGNORE_CASE),
+        Regex("Adnan your otp is (\\d{7})", RegexOption.IGNORE_CASE) // Added based on your screenshot
     )
 
     // Common SMS app package names (for NotificationListenerService)
