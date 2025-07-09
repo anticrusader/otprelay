@@ -29,8 +29,6 @@ import com.google.android.material.switchmaterial.SwitchMaterial
 import java.text.SimpleDateFormat
 import java.util.*
 
-// Assume Constants.kt, OTPService.kt, OTPForwarder.kt, SmsTestActivity.kt exist and are correctly defined.
-
 class MainActivity : AppCompatActivity() {
 
     private val TAG = Constants.LOG_TAG
@@ -40,7 +38,7 @@ class MainActivity : AppCompatActivity() {
     // UI Elements
     private lateinit var autoForwardSwitch: SwitchMaterial
     private lateinit var serviceStatusTextView: TextView
-    private lateinit var lastSentOtpTextView: TextView
+    private lateinit var lastSentOtpTextView: TextView // New: For displaying last sent OTP
     private lateinit var notificationAccessButton: Button
     private lateinit var smsPermissionButton: Button
     private lateinit var notificationPermissionButton: Button
@@ -94,7 +92,7 @@ class MainActivity : AppCompatActivity() {
         // Initialize UI elements (findViewById)
         autoForwardSwitch = findViewById(R.id.autoForwardSwitch)
         serviceStatusTextView = findViewById(R.id.serviceStatusTextView)
-        lastSentOtpTextView = findViewById(R.id.lastSentOtpTextView)
+        lastSentOtpTextView = findViewById(R.id.lastSentOtpTextView) // Initialize the new TextView
         notificationAccessButton = findViewById(R.id.notificationAccessButton)
         smsPermissionButton = findViewById(R.id.smsPermissionButton)
         notificationPermissionButton = findViewById(R.id.notificationPermissionButton)
@@ -139,7 +137,7 @@ class MainActivity : AppCompatActivity() {
         // Test and Debug Buttons
         testForwardingButton.setOnClickListener { testMakeForwarding() }
         debugButton.setOnClickListener {
-            val intent = Intent(this, SmsTestActivity::class.java)
+            val intent = Intent(this, SmsTestActivity::class.java) // Assuming SmsTestActivity exists
             startActivity(intent)
         }
 
@@ -202,6 +200,9 @@ class MainActivity : AppCompatActivity() {
         updateAllPermissionStatusUI()
         updateServiceStatusUI(isServiceRunning(OTPService::class.java))
 
+        // Re-load last sent OTP details on resume
+        loadLastSentOtpDetails()
+
         // Register LocalBroadcastReceiver to get updates from OTPService
         LocalBroadcastManager.getInstance(this).registerReceiver(
             otpForwardedReceiver, IntentFilter(Constants.ACTION_OTP_FORWARDED)
@@ -213,6 +214,11 @@ class MainActivity : AppCompatActivity() {
         Log.d(TAG, "MainActivity: onPause")
         // Unregister LocalBroadcastReceiver
         LocalBroadcastManager.getInstance(this).unregisterReceiver(otpForwardedReceiver)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        Log.d(TAG, "MainActivity: onDestroy")
     }
 
     /**
@@ -246,7 +252,29 @@ class MainActivity : AppCompatActivity() {
         // OTP Length Settings
         otpMinLengthEditText.setText(prefs.getInt(Constants.KEY_OTP_MIN_LENGTH, Constants.DEFAULT_OTP_MIN_LENGTH).toString())
         otpMaxLengthEditText.setText(prefs.getInt(Constants.KEY_OTP_MAX_LENGTH, Constants.DEFAULT_OTP_MAX_LENGTH).toString())
+
+        // Load and display the last sent OTP details
+        loadLastSentOtpDetails()
     }
+
+    /**
+     * Loads the last forwarded OTP details from SharedPreferences and updates the UI.
+     */
+    private fun loadLastSentOtpDetails() {
+        val prefs = getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
+        val lastOtp = prefs.getString("last_forwarded_otp_value", null)
+        val lastSender = prefs.getString("last_forwarded_otp_sender", null)
+        val lastTimestamp = prefs.getLong("last_forwarded_otp_timestamp", 0L)
+
+        if (lastOtp != null && lastSender != null && lastTimestamp != 0L) {
+            updateLastSentOtpUI(lastOtp, lastSender, lastTimestamp)
+        } else {
+            // Use a string resource for "N/A"
+            lastSentOtpTextView.text = getString(R.string.last_otp_sent_na)
+            Log.d(TAG, "No last sent OTP data found in preferences.")
+        }
+    }
+
 
     /**
      * Sets up TextWatchers for all EditText fields to save their values to SharedPreferences.
@@ -492,13 +520,24 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Updates the UI with the last forwarded OTP, sender, and timestamp.
+     * Also persists this data to SharedPreferences.
      * @param otp The last OTP forwarded.
      * @param sender The sender of the OTP.
      * @param timestamp The timestamp when the OTP was forwarded.
      */
     private fun updateLastSentOtpUI(otp: String, sender: String, timestamp: Long) {
         val formattedDate = SimpleDateFormat("HH:mm:ss (dd MMM)", Locale.getDefault()).format(Date(timestamp))
-        lastSentOtpTextView.text = "Last sent: '$otp' from '$sender' at $formattedDate"
+        lastSentOtpTextView.text = getString(R.string.last_otp_sent_format, otp, sender, formattedDate)
+        Log.d(TAG, "UI Updated: Last sent OTP: '$otp' from '$sender' at $formattedDate")
+
+        // Persist the details to SharedPreferences
+        val prefs = getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().apply {
+            putString("last_forwarded_otp_value", otp)
+            putString("last_forwarded_otp_sender", sender)
+            putLong("last_forwarded_otp_timestamp", timestamp)
+            apply()
+        }
     }
 
     /**

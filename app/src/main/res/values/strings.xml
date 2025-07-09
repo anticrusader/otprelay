@@ -1,4 +1,13 @@
 <resources>
     <string name="app_name">OTP Relay</string>
     <string name="disclaimer_text">M.M. OTP Bridge</string>
-</resources>
+	<string name="last_otp_sent_na">Last OTP sent: N/A</string>
+    <string name="last_otp_sent_format">Last sent: \'%1$s\' from \'%2$s\' at %3$s</string>
+    <string name="service_running">Service: Running ✅</string>
+    <string name="service_stopped">Service: Not Running ❌</string>
+    <string name="grant_sms_permissions">Grant SMS Permissions</string>
+    <string name="sms_permissions_granted">SMS Permissions Granted ✅</string>
+    <string name="grant_notification_permission">Grant Notification Permission (Android 13+)</string>
+    <string name="notification_access_granted">Notification Access: Granted ✅</string>
+    <string name="notification_access_not_granted">Notification Access: Not Granted ❌</string>
+ </resources>

@@ -367,6 +367,8 @@ object OTPForwarder {
 
     /**
      * Sends a local broadcast indicating that an OTP has been forwarded.
+     * This broadcast will be caught by the MainActivity to update the UI.
+     * The timestamp passed here is the raw System.currentTimeMillis() when the OTP was processed.
      */
     private fun sendOtpForwardedBroadcast(context: Context, otp: String, sender: String, timestamp: Long) {
         val intent = Intent(Constants.ACTION_OTP_FORWARDED).apply {
@@ -375,7 +377,7 @@ object OTPForwarder {
             putExtra(Constants.EXTRA_TIMESTAMP, timestamp)
         }
         LocalBroadcastManager.getInstance(context).sendBroadcast(intent)
-        Log.d(TAG, "OTPForwarder: Sent broadcast for forwarded OTP: $otp from $sender")
+        Log.d(TAG, "OTPForwarder: Sent broadcast for forwarded OTP: $otp from $sender at $timestamp")
     }
 
     /**
