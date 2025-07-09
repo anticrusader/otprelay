@@ -390,8 +390,117 @@
 
                     </LinearLayout>
 
-                    </LinearLayout>
+                </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
+
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/keywordFilteringCard"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                app:cardCornerRadius="12dp"
+                app:cardElevation="4dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="SMS Keyword Filtering"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Only forward OTPs from messages containing these keywords (e.g., 'OTP', 'code', 'is your', 'from bank'). Leave empty to forward all."
+                        android:textSize="12sp"
+                        android:textColor="?android:attr/textColorSecondary"
+                        android:layout_marginTop="4dp"/>
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/keywordInputLayout"
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:hint="Enter Keyword/Sentence">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/keywordEditText"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="text"
+                            android:maxLines="1"
+                            android:imeOptions="actionDone"/>
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <Button
+                        android:id="@+id/addKeywordButton"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="end"
+                        android:layout_marginTop="8dp"
+                        android:text="Add Keyword"
+                        app:cornerRadius="8dp" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Added Keywords:"
+                        android:textSize="14sp"
+                        android:textStyle="bold"
+                        android:layout_marginTop="16dp" />
+
+                    <com.google.android.material.chip.ChipGroup
+                        android:id="@+id/keywordChipGroup"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        app:chipSpacingHorizontal="8dp"
+                        app:chipSpacingVertical="4dp" />
+					<TextView
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:text="Custom OTP Regexes"
+    android:textStyle="bold"
+    android:layout_marginTop="16dp"/>
+
+<LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical">
+
+    <EditText
+        android:id="@+id/regexEditText"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:hint="Enter custom OTP regex"
+        android:inputType="textNoSuggestions"
+        android:maxLines="1"/>
+
+    <Button
+        android:id="@+id/addRegexButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Add Regex"/>
+</LinearLayout>
+<com.google.android.material.chip.ChipGroup
+    android:id="@+id/regexChipGroup"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:padding="8dp"/>
+
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
 
             <TextView
                 android:id="@+id/permissionStatusTextView"
@@ -401,6 +510,7 @@
                 android:text="Permissions Status: Checking..."
                 android:textSize="12sp"
                 android:textColor="@android:color/darker_gray" />
+			
 
         </LinearLayout>
     </ScrollView>

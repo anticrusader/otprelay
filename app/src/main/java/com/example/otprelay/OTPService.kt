@@ -14,6 +14,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
 import java.util.concurrent.ConcurrentHashMap
+import java.util.Locale
 
 // New data class to hold SMS information
 data class SmsData(val id: Long, val sender: String, val body: String, val timestamp: Long)
@@ -52,47 +53,30 @@ class OTPService : Service() {
         const val EXTRA_SMS_MESSAGE_BODY = "extra_sms_message_body"
         const val EXTRA_SMS_SENDER = "extra_sms_sender"
         const val EXTRA_SMS_TIMESTAMP = "extra_sms_timestamp"
+        const val EXTRA_SOURCE_TYPE = "extra_source_type" // Added this constant
 
         private const val MESSAGE_PROCESS_SMS_CONTENT_PROVIDER = 1
-    }
-
-    // Handler that receives messages from the thread
-    private inner class ServiceHandler(looper: Looper) : Handler(looper) {
-        override fun handleMessage(msg: Message) {
-            when (msg.what) {
-                MESSAGE_PROCESS_SMS_CONTENT_PROVIDER -> {
-                    Log.d(TAG, "ServiceHandler: Processing SMS from content provider via message.")
-                    processNewSmsFromContentProvider()
-                }
-                else -> super.handleMessage(msg)
-            }
-        }
+        private const val SMS_POLLING_INTERVAL_MS = 60000L // Poll every 60 seconds
     }
 
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "OTPService: onCreate")
 
-        createNotificationChannels() // Ensure channels exist
-        startForegroundService() // Start as foreground immediately
+        // Load the last processed SMS ID from preferences
+        val sharedPrefs = applicationContext.getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
+        lastProcessedSmsIdFromPrefs = sharedPrefs.getLong(Constants.KEY_LAST_PROCESSED_SMS_ID, -1L)
+        Log.d(TAG, "OTPService: Loaded lastProcessedSmsIdFromPrefs: $lastProcessedSmsIdFromPrefs")
 
-        // Start up the thread running the service. A looper is needed for the Handler.
-        HandlerThread("OTPServiceThread", Process.THREAD_PRIORITY_BACKGROUND).apply {
+        // Start a new HandlerThread for background operations
+        HandlerThread("OTPServiceHandlerThread", Process.THREAD_PRIORITY_BACKGROUND).apply {
             start()
             serviceLooper = looper
             serviceHandler = ServiceHandler(looper)
         }
 
-        // Load the last processed SMS ID from SharedPreferences
-        lastProcessedSmsIdFromPrefs = getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
-            .getLong(Constants.KEY_LAST_PROCESSED_SMS_ID, -1L)
-        Log.d(TAG, "OTPService: Loaded lastProcessedSmsId from prefs: $lastProcessedSmsIdFromPrefs")
-
-        // Register the SMS Content Observer
-        registerSmsContentObserver()
-
-        // Start periodic polling for SMS (as a fallback/complement to ContentObserver)
-        startSmsPolling()
+        // Initialize notification channel for foreground service
+        createNotificationChannels()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -100,330 +84,263 @@ class OTPService : Service() {
 
         when (intent?.action) {
             ACTION_START_FOREGROUND -> {
-                Log.d(TAG, "OTPService: Received ACTION_START_FOREGROUND. Ensuring foreground.")
-                startForegroundService() // Ensure it's in foreground mode
+                startForegroundService()
+                startSmsMonitoring() // Start both observer and polling
             }
             ACTION_STOP_FOREGROUND -> {
-                Log.d(TAG, "OTPService: Received ACTION_STOP_FOREGROUND. Stopping service.")
-                stopSelf() // Stops the service
+                stopForegroundService()
             }
             ACTION_PROCESS_SMS_BROADCAST -> {
                 val messageBody = intent.getStringExtra(EXTRA_SMS_MESSAGE_BODY)
                 val sender = intent.getStringExtra(EXTRA_SMS_SENDER)
                 val timestamp = intent.getLongExtra(EXTRA_SMS_TIMESTAMP, System.currentTimeMillis())
-                Log.d(TAG, "OTPService: Received ACTION_PROCESS_SMS_BROADCAST for SMS from $sender.")
+                val sourceType = intent.getStringExtra(EXTRA_SOURCE_TYPE) ?: OTPForwarder.SourceType.SMS.name
                 if (messageBody != null && sender != null) {
-                    processSms(messageBody, sender, timestamp, source = "SMS_Broadcast")
-                } else {
-                    Log.e(TAG, "OTPService: SMS broadcast intent missing message body or sender.")
-                }
-            }
-            else -> {
-                // For direct service starts (e.g., from system, or startService without specific action)
-                // Ensure it transitions to foreground if not already.
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService()
+                    // Use the handler to process the SMS on the background thread
+                    serviceHandler.post {
+                        processSms(messageBody, sender, timestamp, sourceType)
+                    }
                 }
             }
         }
 
-        return START_STICKY // Service will be recreated by system if killed
+        // If we get killed, after returning from here, restart
+        return START_STICKY
     }
 
-    override fun onBind(intent: Intent): IBinder? {
-        Log.d(TAG, "OTPService: onBind")
-        return serviceBinder // Return null if no binding is needed
+    override fun onBind(intent: Intent?): IBinder? {
+        // We don't provide binding, so return null
+        return serviceBinder
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        Log.d(TAG, "OTPService: onDestroy. Cleaning up resources.")
+        Log.d(TAG, "OTPService: onDestroy")
+        stopSmsMonitoring()
+        serviceLooper.quitSafely()
+        serviceScope.cancel() // Cancel all coroutines launched in serviceScope
+        Log.d(TAG, "OTPService: Service destroyed.")
+    }
 
-        smsContentObserver?.let {
-            contentResolver.unregisterContentObserver(it)
-            Log.d(TAG, "OTPService: SMS Content Observer unregistered.")
-        }
-
-        pollingJob?.cancel() // Cancel the coroutine job for polling
-        pollingJob = null
-        serviceScope.cancel() // Cancel the entire scope and its children
-        Log.d(TAG, "OTPService: Coroutine scope and SMS polling job cancelled.")
-
-        serviceLooper.quitSafely() // Quit the HandlerThread gracefully
-        Log.d(TAG, "OTPService: Service HandlerThread quit.")
-
-        // Save the last processed SMS ID to SharedPreferences for next start
-        getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putLong(Constants.KEY_LAST_PROCESSED_SMS_ID, lastProcessedSmsIdFromPrefs)
-            .apply()
-        Log.d(TAG, "OTPService: Saved lastProcessedSmsId: $lastProcessedSmsIdFromPrefs to SharedPreferences.")
-
-        stopForeground(Service.STOP_FOREGROUND_REMOVE) // Remove the foreground notification
-        Log.d(TAG, "OTPService: Foreground service stopped.")
-
-        OTPForwarder.showNotification(
+    private fun startForegroundService() {
+        val notificationIntent = Intent(this, MainActivity::class.java)
+        val pendingIntent: PendingIntent = PendingIntent.getActivity(
             this,
-            "OTP Relay Service Stopped",
-            "Service has been stopped.",
-            Constants.SMS_DEBUG_CHANNEL_ID,
-            priority = NotificationCompat.PRIORITY_LOW,
-            notificationId = Constants.FOREGROUND_SERVICE_NOTIFICATION_ID + 2 // A different ID for stopped notification
+            0, notificationIntent, PendingIntent.FLAG_IMMUTABLE
         )
+
+        val notification = NotificationCompat.Builder(this, Constants.FOREGROUND_SERVICE_CHANNEL_ID)
+            .setContentTitle("OTP Relay Service")
+            .setContentText("Monitoring for OTPs...")
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true) // Makes the notification non-dismissable
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .build()
+
+        startForeground(Constants.FOREGROUND_SERVICE_NOTIFICATION_ID, notification)
+        Log.d(TAG, "OTPService: Started foreground service.")
+    }
+
+    private fun stopForegroundService() {
+        stopForeground(true) // Remove the notification and stop the service
+        stopSelf() // Stop the service
+        Log.d(TAG, "OTPService: Stopped foreground service.")
     }
 
     private fun createNotificationChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val serviceChannel = NotificationChannel(
                 Constants.FOREGROUND_SERVICE_CHANNEL_ID,
-                "OTP Relay Service",
-                NotificationManager.IMPORTANCE_LOW
+                Constants.FOREGROUND_SERVICE_CHANNEL_NAME,
+                NotificationManager.IMPORTANCE_LOW // Low importance for ongoing service
             ).apply {
-                description = "Channel for the foreground service notifications."
-                setSound(null, null)
-                enableVibration(false)
-            }
-            val debugChannel = NotificationChannel(
-                Constants.SMS_DEBUG_CHANNEL_ID,
-                "OTP Relay Debug Alerts",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Channel for debugging SMS/OTP processing."
+                description = "Channel for the foreground OTP Relay service status."
             }
 
-            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val debugChannel = NotificationChannel(
+                Constants.SMS_DEBUG_CHANNEL_ID,
+                Constants.SMS_DEBUG_CHANNEL_NAME,
+                NotificationManager.IMPORTANCE_DEFAULT // Default importance for debug messages
+            ).apply {
+                description = "Channel for debug messages and forwarded OTP confirmations."
+            }
+
+            val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(serviceChannel)
             manager.createNotificationChannel(debugChannel)
-            Log.d(TAG, "OTPService: Notification channels created/ensured.")
         }
     }
 
-    private fun startForegroundService() {
-        val notificationIntent = Intent(this, MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            notificationIntent,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            } else {
-                PendingIntent.FLAG_UPDATE_CURRENT
+    // Handler that receives messages from the thread
+    private inner class ServiceHandler(looper: Looper) : Handler(looper) {
+        override fun handleMessage(msg: Message) {
+            when (msg.what) {
+                MESSAGE_PROCESS_SMS_CONTENT_PROVIDER -> {
+                    // Extract SmsData from Message object
+                    val smsData = msg.obj as SmsData
+                    processSms(smsData.body, smsData.sender, smsData.timestamp, OTPForwarder.SourceType.SMS.name)
+                }
             }
-        )
-
-        val notification = NotificationCompat.Builder(this, Constants.FOREGROUND_SERVICE_CHANNEL_ID)
-            .setContentTitle("OTP Relay Service Running")
-            .setContentText("Monitoring for OTPs...")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentIntent(pendingIntent)
-            .setOngoing(true)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .build()
-
-        startForeground(Constants.FOREGROUND_SERVICE_NOTIFICATION_ID, notification)
-        Log.d(TAG, "OTPService: Foreground service started.")
+        }
     }
 
-    /**
-     * Registers a ContentObserver to listen for changes in the SMS inbox.
-     * This is the preferred method for real-time SMS detection.
-     */
-    private fun registerSmsContentObserver() {
+    private fun startSmsMonitoring() {
+        // 1. Register ContentObserver for real-time SMS changes
         if (smsContentObserver == null) {
-            smsContentObserver = object : ContentObserver(serviceHandler) {
+            smsContentObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
                 override fun onChange(selfChange: Boolean, uri: Uri?) {
                     super.onChange(selfChange, uri)
-                    Log.d(TAG, "ContentObserver: onChange detected on URI: $uri, selfChange: $selfChange")
-                    // Post a message to the handler to process SMS on the service's background thread
-                    serviceHandler.obtainMessage(MESSAGE_PROCESS_SMS_CONTENT_PROVIDER).sendToTarget()
+                    Log.d(TAG, "SMS ContentObserver: onChange triggered for URI: $uri")
+                    // Schedule a check for new SMS messages on the service's background thread
+                    serviceHandler.post {
+                        checkForNewSms(true) // Indicate it's from observer
+                    }
                 }
             }
             try {
-                contentResolver.registerContentObserver(
-                    Telephony.Sms.Inbox.CONTENT_URI,
-                    true, // notifyForDescendants - true for inbox SMS
-                    smsContentObserver!!
-                )
-                Log.d(TAG, "OTPService: SMS Content Observer registered successfully.")
+                contentResolver.registerContentObserver(Telephony.Sms.CONTENT_URI, true, smsContentObserver!!)
+                Log.d(TAG, "SMS ContentObserver registered.")
             } catch (e: SecurityException) {
-                Log.e(TAG, "OTPService: SMS permission denied for ContentObserver. Cannot register. ${e.message}")
-                OTPForwarder.showNotification(
-                    this,
-                    "SMS Permission Denied",
-                    "Cannot monitor SMS. Please grant READ_SMS permission.",
-                    Constants.SMS_DEBUG_CHANNEL_ID
-                )
-            } catch (e: Exception) {
-                Log.e(TAG, "OTPService: Failed to register SMS Content Observer: ${e.message}", e)
+                Log.e(TAG, "Permission denied for SMS ContentObserver: ${e.message}")
+                OTPForwarder.showNotification(this, "SMS Permission Denied", "Cannot read SMS messages. Please grant READ_SMS permission.", Constants.SMS_DEBUG_CHANNEL_ID)
             }
+        }
+
+        // 2. Start periodic polling as a fallback (for devices where ContentObserver might be unreliable or for missed SMS)
+        if (pollingJob == null || pollingJob?.isActive == false) {
+            pollingJob = serviceScope.launch {
+                while (isActive) {
+                    delay(SMS_POLLING_INTERVAL_MS)
+                    Log.d(TAG, "SMS Polling: Checking for new messages...")
+                    checkForNewSms(false) // Indicate it's from polling
+                }
+            }
+            Log.d(TAG, "SMS Polling started.")
         }
     }
 
-    /**
-     * Starts a periodic polling job to check for new SMS messages.
-     * This acts as a fallback or complement to the ContentObserver,
-     * ensuring messages are processed even if observer issues arise.
-     */
-    private fun startSmsPolling() {
-        // Cancel any existing polling job before starting a new one
-        pollingJob?.cancel()
-        pollingJob = serviceScope.launch {
-            while (isActive) {
-                Log.d(TAG, "SMS Polling: Initiating periodic SMS check.")
-                processNewSmsFromContentProvider()
-                delay(Constants.SMS_POLLING_INTERVAL_MS)
-            }
-        }
-        Log.d(TAG, "OTPService: Periodic SMS polling started.")
-    }
-
-    /**
-     * Queries the SMS content provider for new messages and processes them.
-     * This function is called by both the ContentObserver and the periodic poller.
-     */
-    private fun processNewSmsFromContentProvider() {
-        val uri = Telephony.Sms.Inbox.CONTENT_URI
-        val sortOrder = "${Telephony.Sms.DATE} DESC LIMIT 10" // Get the 10 most recent messages
-        val projection = arrayOf(
-            Telephony.Sms._ID,
-            Telephony.Sms.ADDRESS,
-            Telephony.Sms.BODY,
-            Telephony.Sms.DATE // Timestamp when the SMS was received
-        )
-
-        var cursor: android.database.Cursor? = null
-        try {
-            cursor = contentResolver.query(uri, projection, null, null, sortOrder)
-
-            cursor?.let {
-                val idColumn = it.getColumnIndex(Telephony.Sms._ID)
-                val addressColumn = it.getColumnIndex(Telephony.Sms.ADDRESS)
-                val bodyColumn = it.getColumnIndex(Telephony.Sms.BODY)
-                val dateColumn = it.getColumnIndex(Telephony.Sms.DATE)
-
-                if (idColumn == -1 || addressColumn == -1 || bodyColumn == -1 || dateColumn == -1) {
-                    Log.e(TAG, "OTPService: One or more SMS columns not found. Check projection.")
-                    OTPForwarder.showNotification(
-                        this,
-                        "SMS Processing Error",
-                        "Required SMS data not found. Check app permissions and Android version compatibility.",
-                        Constants.SMS_DEBUG_CHANNEL_ID
-                    )
-                    return
-                }
-
-                val messagesToProcess = mutableListOf<SmsData>()
-
-                if (it.moveToFirst()) {
-                    do {
-                        val smsId = it.getLong(idColumn)
-                        val sender = it.getString(addressColumn)
-                        val body = it.getString(bodyColumn)
-                        val timestamp = it.getLong(dateColumn)
-
-                        // Only process SMS messages that are newer than the last processed ID
-                        // AND within a reasonable time window (e.g., last 1 minute)
-                        if (smsId > lastProcessedSmsIdFromPrefs &&
-                            (System.currentTimeMillis() - timestamp < Constants.SMS_MAX_AGE_FOR_PROCESSING_MS)
-                        ) {
-                            // Check against in-memory cache to prevent immediate duplicates from ContentObserver/Polling
-                            if (!processedSmsIds.containsKey(smsId) ||
-                                (System.currentTimeMillis() - (processedSmsIds[smsId] ?: 0L) > Constants.DUPLICATE_PREVENTION_WINDOW_MS)) {
-                                messagesToProcess.add(SmsData(smsId, sender, body, timestamp))
-                            } else {
-                                Log.d(TAG, "Skipping recently processed SMS ID $smsId from content provider (in-service cache hit).")
-                            }
-                        } else if (smsId <= lastProcessedSmsIdFromPrefs) {
-                            Log.d(TAG, "Skipping old SMS ID $smsId (lastProcessedId: $lastProcessedSmsIdFromPrefs).")
-                        } else { // This else block catches messages that are newer by ID but too old by timestamp
-                            Log.d(TAG, "Skipping SMS ID $smsId (timestamp: $timestamp), older than ${Constants.SMS_MAX_AGE_FOR_PROCESSING_MS}ms.")
-                        }
-                    } while (it.moveToNext())
-                }
-
-                // Process messages in ascending order of SMS ID to maintain sequence
-                messagesToProcess.sortBy { smsData -> smsData.id }
-
-                var highestProcessedIdInThisBatch: Long = lastProcessedSmsIdFromPrefs
-
-                for (smsData in messagesToProcess) {
-                    Log.d(TAG, "OTPService: Processing new SMS ID: ${smsData.id} from ${smsData.sender} (Content Provider).")
-                    processSms(smsData.body, smsData.sender, smsData.timestamp, source = "SMS_ContentProvider")
-
-                    // Add to in-memory cache after processing attempt
-                    processedSmsIds[smsData.id] = System.currentTimeMillis()
-                    Log.d(TAG, "OTPService: Added SMS ID ${smsData.id} to in-memory cache.")
-
-                    if (smsData.id > highestProcessedIdInThisBatch) {
-                        highestProcessedIdInThisBatch = smsData.id
-                    }
-                }
-
-                // Update the lastProcessedSmsIdFromPrefs only after processing all relevant messages in this batch
-                if (highestProcessedIdInThisBatch > lastProcessedSmsIdFromPrefs) {
-                    lastProcessedSmsIdFromPrefs = highestProcessedIdInThisBatch
-                    // Persist to SharedPreferences immediately for robustness
-                    getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
-                        .edit()
-                        .putLong(Constants.KEY_LAST_PROCESSED_SMS_ID, lastProcessedSmsIdFromPrefs)
-                        .apply()
-                    Log.d(TAG, "OTPService: Updated lastProcessedSmsIdFromPrefs to $lastProcessedSmsIdFromPrefs.")
-                }
-
-                // Prune old entries from cache regardless of new SMS processing
-                val cutoffTime = System.currentTimeMillis() - Constants.DUPLICATE_PREVENTION_WINDOW_MS
-                processedSmsIds.entries.removeIf { it.value < cutoffTime }
-                Log.d(TAG, "OTPService: Pruned processedSmsIds cache. Current size: ${processedSmsIds.size}")
-
-            } ?: Log.d(TAG, "OTPService: No new SMS messages or cursor is null.")
-
-        } catch (e: SecurityException) {
-            Log.e(TAG, "OTPService: SMS permission not granted to read SMS: ${e.message}")
-            OTPForwarder.showNotification(
-                this,
-                "SMS Permission Required",
-                "Please grant READ_SMS permission to allow OTP Relay to read new messages.",
-                Constants.SMS_DEBUG_CHANNEL_ID
-            )
-            // If permission is denied, stop polling and observer as they won't work
-            smsContentObserver?.let {
+    private fun stopSmsMonitoring() {
+        smsContentObserver?.let {
+            try {
                 contentResolver.unregisterContentObserver(it)
-                smsContentObserver = null
-                Log.d(TAG, "OTPService: Unregistered observer due to permission denial.")
+                Log.d(TAG, "SMS ContentObserver unregistered.")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error unregistering ContentObserver: ${e.message}")
             }
-            pollingJob?.cancel()
-            pollingJob = null
-            Log.d(TAG, "OTPService: Cancelled polling due to permission denial.")
+        }
+        smsContentObserver = null
 
-        } catch (e: Exception) {
-            Log.e(TAG, "OTPService: Error querying SMS content provider: ${e.message}", e)
-            OTPForwarder.showNotification(
-                this,
-                "SMS Reading Error",
-                "Failed to read SMS messages: ${e.message}",
-                Constants.SMS_DEBUG_CHANNEL_ID
+        pollingJob?.cancel()
+        pollingJob = null
+        Log.d(TAG, "SMS Polling stopped.")
+    }
+
+    /**
+     * Checks for new SMS messages from the content provider.
+     * This function should be called on a background thread.
+     */
+    private fun checkForNewSms(fromObserver: Boolean) {
+        val messages = mutableListOf<SmsData>()
+        val cursor = try {
+            contentResolver.query(
+                Telephony.Sms.Inbox.CONTENT_URI,
+                arrayOf(Telephony.Sms.Inbox._ID, Telephony.Sms.Inbox.ADDRESS, Telephony.Sms.Inbox.BODY, Telephony.Sms.Inbox.DATE),
+                null,
+                null,
+                "${Telephony.Sms.Inbox.DATE} DESC LIMIT 5" // Get the 5 most recent messages
             )
-        } finally {
-            cursor?.close()
+        } catch (e: SecurityException) {
+            Log.e(TAG, "SecurityException when querying SMS inbox: ${e.message}")
+            OTPForwarder.showNotification(this, "SMS Read Error", "Permission to read SMS denied.", Constants.SMS_DEBUG_CHANNEL_ID)
+            null
+        } catch (e: Exception) {
+            Log.e(TAG, "Error querying SMS inbox: ${e.message}", e)
+            null
+        }
+
+        cursor?.use {
+            val idColumn = it.getColumnIndex(Telephony.Sms.Inbox._ID)
+            val addressColumn = it.getColumnIndex(Telephony.Sms.Inbox.ADDRESS)
+            val bodyColumn = it.getColumnIndex(Telephony.Sms.Inbox.BODY)
+            val dateColumn = it.getColumnIndex(Telephony.Sms.Inbox.DATE)
+
+            if (idColumn == -1 || addressColumn == -1 || bodyColumn == -1 || dateColumn == -1) {
+                Log.e(TAG, "One or more SMS columns not found.")
+                return
+            }
+
+            while (it.moveToNext()) {
+                val id = it.getLong(idColumn)
+                val sender = it.getString(addressColumn)
+                val body = it.getString(bodyColumn)
+                val timestamp = it.getLong(dateColumn)
+                messages.add(0, SmsData(id, sender, body, timestamp)) // Add to front to process oldest first
+            }
+        } ?: run {
+            Log.w(TAG, "SMS cursor is null or empty. No SMS to process.")
+            return
+        }
+
+        // Only process messages newer than the last processed ID
+        // Or, if from observer, process all up to lastProcessedSmsIdFromPrefs (if it was set post-app install)
+        val newMessages = messages.filter { smsData ->
+            val isNew = smsData.id > lastProcessedSmsIdFromPrefs
+            val isAlreadyProcessedInSession = processedSmsIds.containsKey(smsData.id)
+            isNew && !isAlreadyProcessedInSession
+        }.sortedBy { it.id } // Ensure processing in chronological order by ID
+
+        if (newMessages.isNotEmpty()) {
+            Log.d(TAG, "Found ${newMessages.size} new SMS messages from ${if (fromObserver) "observer" else "polling"}.")
+            newMessages.forEach { smsData ->
+                // Add to in-memory cache to prevent immediate re-processing
+                processedSmsIds[smsData.id] = System.currentTimeMillis()
+                processSms(smsData.body, smsData.sender, smsData.timestamp, OTPForwarder.SourceType.SMS.name)
+            }
+            // Update the last processed SMS ID in preferences only if new messages were processed
+            lastProcessedSmsIdFromPrefs = newMessages.last().id
+            applicationContext.getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putLong(Constants.KEY_LAST_PROCESSED_SMS_ID, lastProcessedSmsIdFromPrefs)
+                .apply()
+        } else {
+            Log.d(TAG, "No new SMS messages found from ${if (fromObserver) "observer" else "polling"}.")
         }
     }
 
-
     /**
-     * Common function to process an SMS message (from ContentObserver, Polling, or Broadcast).
-     * It extracts OTP and initiates forwarding.
-     * @param messageBody The full body of the SMS message.
+     * Processes an SMS message to extract and forward OTP if found.
+     * This function should be called on a background thread.
+     * @param messageBody The body of the SMS message.
      * @param sender The sender's address/number.
      * @param timestamp The timestamp of the SMS.
      * @param source A string indicating the source of this SMS (e.g., "SMS_ContentProvider", "SMS_Broadcast").
      */
     private fun processSms(messageBody: String, sender: String, timestamp: Long, source: String) {
-        val otp = OTPForwarder.extractOtpFromMessage(messageBody, this.applicationContext)
+        val sharedPrefs = this.applicationContext.getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
+
+        // Retrieve the keywords and custom regexes from preferences
+        val smsKeywords = sharedPrefs.getStringSet(Constants.KEY_SMS_KEYWORDS, Constants.DEFAULT_SMS_KEYWORDS)?.toSet() ?: emptySet()
+        val customOtpRegexes = sharedPrefs.getStringSet(Constants.KEY_CUSTOM_OTP_REGEXES, Constants.DEFAULT_OTP_REGEXES)?.toSet() ?: emptySet()
+        val otpMinLength = sharedPrefs.getInt(Constants.KEY_OTP_MIN_LENGTH, Constants.DEFAULT_OTP_MIN_LENGTH)
+        val otpMaxLength = sharedPrefs.getInt(Constants.KEY_OTP_MAX_LENGTH, Constants.DEFAULT_OTP_MAX_LENGTH)
+
+        // Pre-check with keywords to quickly filter out irrelevant messages
+        val lowerCaseMessage = messageBody.lowercase(Locale.getDefault())
+        val containsKeyword = smsKeywords.any { lowerCaseMessage.contains(it) }
+
+        if (!containsKeyword) {
+            Log.d(TAG, "OTPService: SMS from $sender does not contain configured keywords. Skipping OTP extraction.")
+            return
+        }
+
+        // Pass the keywords and custom regexes to extractOtpFromMessage
+        val otp = OTPForwarder.extractOtpFromMessage(messageBody, this.applicationContext, customOtpRegexes, otpMinLength, otpMaxLength)
 
         if (otp != null) {
             Log.d(TAG, "OTPService: OTP '$otp' extracted from SMS from $sender (Source: $source). Forwarding...")
-            // The OTPForwarder itself contains its own duplicate check based on the OTP value and sender.
-            OTPForwarder.forwardOtpViaMake(otp, messageBody, sender, this.applicationContext)
+            // Call the renamed function and pass the source type
+            OTPForwarder.forwardOtp(otp, messageBody, sender, this.applicationContext, source)
         } else {
             Log.d(TAG, "OTPService: No OTP found in SMS from $sender (Source: $source): '$messageBody'")
             OTPForwarder.showNotification(

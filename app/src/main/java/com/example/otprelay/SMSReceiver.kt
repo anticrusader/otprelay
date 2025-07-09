@@ -89,6 +89,8 @@ class SMSReceiver : BroadcastReceiver() {
                 // Use the actual SMS timestamp for better duplicate prevention, if available.
                 // Fallback to current time if not.
                 putExtra(OTPService.EXTRA_SMS_TIMESTAMP, messageTimestamp)
+                // Add source type so OTPService knows it's an SMS
+                putExtra(OTPService.EXTRA_SOURCE_TYPE, OTPForwarder.SourceType.SMS.name)
             }
 
             // Start the service as a foreground service to ensure it has enough time to process
