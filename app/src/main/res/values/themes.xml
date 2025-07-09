@@ -1,18 +1,38 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base application theme for light mode. -->
+<resources>
+    <!-- Change the parent to a Material 3 theme.
+         Theme.Material3.DayNight.NoActionBar will provide default Material 3 colors
+         and typography for both light and dark modes. -->
     <style name="Theme.OTPRelay" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Customize your light theme here. -->
-        <!-- Primary brand color. -->
-        <item name="colorPrimary">@color/purple_500</item>
-        <item name="colorPrimaryVariant">@color/purple_700</item>
-        <item name="colorOnPrimary">@color/white</item>
-        <!-- Secondary brand color. -->
-        <item name="colorSecondary">@color/teal_200</item>
-        <item name="colorSecondaryVariant">@color/teal_700</item>
-        <item name="colorOnSecondary">@color/black</item>
-        <!-- Status bar color. -->
-        <item name="android:statusBarColor" tools:targetApi="l">?attr/colorPrimaryVariant</item>
-        <!-- Customize your theme here. -->
+        <!-- You can keep the statusBarColor if you want to explicitly control it.
+             For Material 3, it's typically 'colorPrimary' or 'colorSurface'. -->
+        <item name="android:statusBarColor">?attr/colorPrimary</item>
+
+        <!-- The following color items are from Material 2.
+             While they might still work in some Material 3 contexts,
+             it's best practice to either remove them and let M3 use its defaults,
+             or define the full set of Material 3 color attributes using M3 naming conventions
+             (e.g., colorPrimary, colorOnPrimary, colorSecondary, colorOnSecondary, etc.)
+             and reference M3-specific colors from your colors.xml.
+
+             For now, to ensure the crash is fixed, we will remove them to rely on M3 defaults.
+             If you want custom colors later, you'll need to define the M3 palette.
+        -->
+        <!-- <item name="colorPrimary">@color/purple_500</item> -->
+        <!-- <item name="colorPrimaryVariant">@color/purple_700</item> -->
+        <!-- <item name="colorOnPrimary">@color/white</item> -->
+        <!-- <item name="colorSecondary">@color/teal_200</item> -->
+        <!-- <item name="colorSecondaryVariant">@color/teal_700</item> -->
+        <!-- <item name="colorOnSecondary">@color/black</item> -->
     </style>
+
+    <!-- Keep these as they are for now, as they are not directly causing the crash. -->
+    <style name="Theme.OTPRelay.NoActionBar">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+    </style>
+
+    <style name="Theme.OTPRelay.AppBarOverlay" parent="ThemeOverlay.AppCompat.Dark.ActionBar" />
+    <style name="Theme.OTPRelay.PopupOverlay" parent="ThemeOverlay.AppCompat.Light" />
+
 </resources>

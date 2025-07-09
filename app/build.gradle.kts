@@ -1,15 +1,16 @@
-// Ensure you have the Android Gradle Plugin and Kotlin plugin at the top of the file
+// C:\Users\Sufian\AndroidStudioProjects\OTPRelay\app\build.gradle.kts
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
 
 android {
-    namespace = "com.example.otprelay" // Make sure this matches your actual package name (e.g., com.example.otprelay)
-    compileSdk = 34 // Or your target SDK version
+    namespace = "com.example.otprelay"
+    compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.example.otprelay" // Make sure this matches your actual package name
+        applicationId = "com.example.otprelay"
         minSdk = 24
         targetSdk = 34
         versionCode = 1
@@ -24,28 +25,51 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
+
+    // --- FIXES START HERE ---
+
+    // Update Java compatibility to a more recent version (e.g., Java 17)
+    // This addresses the warnings about deprecated source/target version 8.
+    // Ensure your JDK in Android Studio is also set to 17 or higher.
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions {
-        jvmTarget = "1.8"
+        jvmTarget = "17" // Must match the compileOptions targetCompatibility
     }
+
     buildFeatures {
+        // Only buildConfig is needed for an XML-based project, no 'compose = true'
         buildConfig = true
     }
+
+    // Add this 'packaging' block to handle duplicate files from dependencies.
+    // This resolves the "2 files found with path 'META-INF/NOTICE.md'" error.
+    packaging {
+        resources {
+            // Exclude common duplicate files that cause conflicts
+            excludes += "/META-INF/NOTICE.md"
+            excludes += "/META-INF/LICENSE.md"
+            excludes += "/META-INF/*.txt" // Generic exclusion for text files in META-INF
+            excludes += "/META-INF/*.SF"  // Signature files
+            excludes += "/META-INF/*.DSA" // Signature files
+            excludes += "/META-INF/*.RSA" // Signature files
+        }
+    }
+
+    // --- FIXES END HERE ---
 }
 
 dependencies {
-
-    // Core AndroidX libraries
+    // Core AndroidX libraries (these are standard for XML projects)
     implementation("androidx.core:core-ktx:1.13.1")
-    implementation("androidx.appcompat:appcompat:1.7.0") // Essential for AppCompatActivity and general UI compatibility
+    implementation("androidx.appcompat:appcompat:1.7.0")
 
-    // Material Design Components (fixes MaterialCardView, SwitchMaterial, Button styles, cornerRadius, etc.)
+    // Material Design Components (for XML UI elements like MaterialCardView, etc.)
     implementation("com.google.android.material:material:1.12.0")
 
-    // ConstraintLayout (fixes layout_constraintTop_toTopOf, layout_constraintStart_toStartOf, etc.)
+    // ConstraintLayout
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
 
     // OkHttp for network requests
@@ -53,6 +77,10 @@ dependencies {
 
     // LocalBroadcastManager (for communication between service and activity)
     implementation("androidx.localbroadcastmanager:localbroadcastmanager:1.1.0")
+
+    // JavaMail dependencies for EmailSender.kt - ADDED THESE BACK
+    implementation("com.sun.mail:android-mail:1.6.7")
+    implementation("com.sun.mail:android-activation:1.6.7")
 
     // Unit testing
     testImplementation("junit:junit:4.13.2")

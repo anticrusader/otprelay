@@ -1,6 +1,7 @@
-package com.example.otprelay
+package com.example.otprelay // Corrected package name
 
 import android.Manifest
+import android.content.Context // Added import for Context
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
@@ -146,7 +147,8 @@ class SmsTestActivity : AppCompatActivity() {
                     result.append("Date: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(date))}\n")
 
                     // Attempt to extract OTP using the centralized OTPForwarder
-                    val otp = OTPForwarder.extractOtpFromMessage(body)
+                    // FIX: Pass context to extractOtpFromMessage
+                    val otp = OTPForwarder.extractOtpFromMessage(body, this)
                     if (otp != null) {
                         result.append("🔑 OTP FOUND: $otp\n")
                     } else {

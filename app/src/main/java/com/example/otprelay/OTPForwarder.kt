@@ -1,307 +1,471 @@
+// OTPForwarder.kt
 package com.example.otprelay
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.*
-import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import org.json.JSONObject
+import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
-import java.util.regex.Pattern
 
 object OTPForwarder {
+
     private val TAG = Constants.LOG_TAG
-    private val MAKE_WEBHOOK_URL = Constants.MAKE_WEBHOOK_URL
+    private val client = OkHttpClient()
 
-    // Using a single-thread executor to process forwarding requests sequentially
-    private val executorService: ExecutorService = Executors.newSingleThreadExecutor()
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-        .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-        .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-        .build()
-
-    // Centralized duplicate prevention map for recently forwarded OTPs
-    // Using ConcurrentHashMap for thread-safety as it might be accessed from different threads (Service, NotificationListener)
-    private val recentlyForwardedOtps = ConcurrentHashMap<String, Long>()
-
-    // Enhanced OTP patterns - ordered by specificity (more specific first)
-    private val otpPatterns = arrayOf(
-        // 1. Common explicit OTP/Code patterns (e.g., "OTP is 123456", "Code: 12345")
-        Pattern.compile("(?:OTP|otp|Code|code|PIN|pin)\\s*(?:is|:)?\\s*(\\d{4,10})\\b", Pattern.CASE_INSENSITIVE),
-        Pattern.compile("(\\d{4,10})\\s*(?:is your|is the)\\s*(?:OTP|otp|code|Code|PIN|pin)", Pattern.CASE_INSENSITIVE),
-        Pattern.compile("(?:Your|your)\\s*(?:OTP|otp|code|Code|PIN|pin)\\s*(?:is|:)?\\s*(\\d{4,10})\\b", Pattern.CASE_INSENSITIVE),
-
-        // 2. Verification/Authentication patterns (e.g., "verification code 123456", "authenticate with 12345")
-        Pattern.compile("(?:verification|verify|authentication|confirm)\\s*(?:code|Code)?\\s*(?:is|:)?\\s*(\\d{4,10})\\b", Pattern.CASE_INSENSITIVE),
-        Pattern.compile("(?:use|enter|input)\\s*(\\d{4,10})\\b", Pattern.CASE_INSENSITIVE),
-        Pattern.compile("(\\d{4,10})\\s*(?:for|to)\\s*(?:verify|authenticate|confirm)", Pattern.CASE_INSENSITIVE),
-
-        // 3. Generic "code" patterns (e.g., "Your code is 12345")
-        Pattern.compile("(?:code|Code)\\s*:?\\s*(\\d{4,10})\\b", Pattern.CASE_INSENSITIVE),
-        Pattern.compile("(\\d{4,10})\\s*is your\\s*\\w+\\s*code", Pattern.CASE_INSENSITIVE),
-
-        // 4. Loose patterns - any 4-10 digit number with surrounding context
-        // This pattern is broad, so the `isLikelyOtpMessage` and `isLikelyOtp` filters are crucial.
-        Pattern.compile("\\b(\\d{4,10})\\b")
-    )
+    // In-memory cache to prevent duplicate forwarding of the same OTP
+    // Key: "OTP_value_normalizedSender_timestamp_rounded" (e.g., "123456_minemobile_1701010100")
+    // Value: Timestamp when it was last forwarded (System.currentTimeMillis())
+    private val forwardedOtpCache = ConcurrentHashMap<String, Long>()
 
     /**
-     * Checks if a given OTP key was recently forwarded within the DUPLICATE_PREVENTION_WINDOW.
-     * Also cleans up old entries in the cache.
-     * @param otpKey The unique key for the OTP (e.g., "OTP_123456_SENDER").
-     * @return True if the OTP was recently forwarded, false otherwise.
+     * Normalizes the sender string to create a consistent key for duplicate checking.
+     * This is crucial for cross-source deduplication (SMS vs. Notification)
+     * where the same logical sender might appear with different identifiers.
+     *
+     * IMPORTANT: You may need to CUSTOMIZE this function further based on the specific senders
+     * you receive OTPs from. Observe the "Title" and "Package Name" from notifications,
+     * and the "Sender" from SMS, and add rules here to map common logical senders
+     * to a single consistent string.
      */
-    fun wasRecentlyForwarded(otpKey: String): Boolean {
-        val lastForwarded = recentlyForwardedOtps[otpKey] ?: 0
-        val now = System.currentTimeMillis()
+    internal fun normalizeSender(senderInput: String): String {
+        val lowerCaseSender = senderInput.lowercase(Locale.getDefault()).trim()
 
-        // Clean up old entries (older than 10 minutes) to prevent memory growth
-        recentlyForwardedOtps.entries.removeIf {
-            now - it.value > Constants.DUPLICATE_PREVENTION_WINDOW_MS * 2 // 10 minutes
+        // *** CUSTOM MAPPING FOR KNOWN SERVICES (HIGHEST PRIORITY) ***
+        // If "Mine" (or "My M.M.") and the specific phone number +923000503779
+        // are known to be the SAME LOGICAL SENDER, map them to a common string.
+        return when {
+            // Map the specific phone number associated with "Mine" service
+            lowerCaseSender.contains("923000503779") -> "mine_service_id"
+            // Map the notification titles/package names for the same service
+            lowerCaseSender.contains("mine") || lowerCaseSender.contains("my m.m.") -> "mine_service_id"
+            // Add more specific service mappings here if needed.
+            // Example: if "Easypaisa" appears as a title and from a specific number:
+            // lowerCaseSender.contains("easypaisa") || lowerCaseSender.contains("specific_easypaisa_number_digits") -> "easypaisa_service_id"
+
+            // 1. Fallback to extracting phone number if not caught by explicit mapping
+            // This regex must be robust to catch various phone number formats.
+            else -> {
+                val phoneMatch = Regex("\\+?\\d[\\d\\s\\-()]{7,18}\\d").find(lowerCaseSender)
+                if (phoneMatch != null) {
+                    // Return digits only for phone numbers for consistency
+                    return phoneMatch.value.replace("[^\\d]".toRegex(), "")
+                }
+                // 2. Fallback to generic alphanumeric cleanup if no phone number and no specific mapping
+                // Remove all non-alphanumeric characters, take first 50, and convert to lowercase
+                lowerCaseSender.replace("[^a-zA-Z0-9]".toRegex(), "").take(50)
+            }
         }
+    }
 
-        return (now - lastForwarded) < Constants.DUPLICATE_PREVENTION_WINDOW_MS
+
+    /**
+     * Checks if a specific OTP has been recently forwarded based on a unique key.
+     * Also prunes old entries from the cache to manage memory.
+     * @param otpKey A unique key for the OTP (e.g., "OTP_value_normalizedSender_timestamp_rounded").
+     * @return True if the OTP was forwarded recently (within DUPLICATE_PREVENTION_WINDOW_MS), false otherwise.
+     */
+    internal fun wasRecentlyForwarded(otpKey: String): Boolean {
+        // Prune old entries from cache before checking for duplicates
+        val cutoffTime = System.currentTimeMillis() - Constants.DUPLICATE_PREVENTION_WINDOW_MS
+        forwardedOtpCache.entries.removeIf { it.value < cutoffTime }
+
+        val lastForwarded = forwardedOtpCache[otpKey] ?: 0L
+        val isDuplicate = (System.currentTimeMillis() - lastForwarded < Constants.DUPLICATE_PREVENTION_WINDOW_MS)
+        if (isDuplicate) {
+            Log.d(TAG, "OTPForwarder: Cache hit for key '$otpKey'. Last forwarded: ${lastForwarded}. Skipping.")
+        }
+        return isDuplicate
     }
 
     /**
-     * Extracts a potential OTP from the given message string.
-     * Iterates through defined regex patterns and applies additional filtering.
-     * @param message The full SMS or notification text.
-     * @return The extracted OTP string, or null if no valid OTP is found.
+     * Extracts an OTP from a given message body using configurable regex patterns.
+     *
+     * @param messageBody The text message body.
+     * @param context The application context to retrieve OTP length settings.
+     * @return The extracted OTP string, or null if not found.
      */
-    fun extractOtpFromMessage(message: String): String? {
-        Log.d(TAG, "Attempting to extract OTP from: '$message'")
+    fun extractOtpFromMessage(messageBody: String, context: Context): String? {
+        val sharedPrefs = context.getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
+        val minLength = sharedPrefs.getInt(Constants.KEY_OTP_MIN_LENGTH, Constants.DEFAULT_OTP_MIN_LENGTH)
+        val maxLength = sharedPrefs.getInt(Constants.KEY_OTP_MAX_LENGTH, Constants.DEFAULT_OTP_MAX_LENGTH)
 
-        for ((index, pattern) in otpPatterns.withIndex()) {
-            val matcher = pattern.matcher(message)
-            if (matcher.find()) {
-                val otp = matcher.group(1)
-                if (otp != null && otp.length >= 4 && otp.length <= 10) { // OTPs are typically 4-10 digits
-                    Log.d(TAG, "Potential OTP found with pattern $index: $otp")
+        // Construct the dynamic length placeholder string
+        val lengthRange = "{$minLength,$maxLength}"
 
-                    // Apply additional checks for the broadest pattern
-                    if (index == otpPatterns.size - 1) {
-                        if (!isLikelyOtpMessage(message)) {
-                            Log.d(TAG, "Skipping broad match, message not likely an OTP message.")
-                            continue // Not a likely OTP message, try next pattern or return null
-                        }
-                    }
+        // Dynamically build regex patterns with configurable digit length
+        val dynamicRegexes = Constants.OTP_REGEX_PATTERNS_TO_GENERATE.map { patternString ->
+            // Replace the custom placeholder with the actual length range
+            val finalPatternString = patternString.replace("{LENGTH_PLACEHOLDER}", lengthRange)
+            Regex(finalPatternString, RegexOption.IGNORE_CASE)
+        }
 
-                    // Final check to filter out non-OTP numbers (e.g., phone numbers, amounts)
-                    if (isLikelyOtp(otp, message)) {
-                        Log.d(TAG, "OTP '$otp' passed final validation.")
-                        return otp
-                    } else {
-                        Log.d(TAG, "OTP '$otp' failed final validation.")
-                    }
+        // Combine dynamic patterns with any fixed-length specific patterns
+        val allPatterns = dynamicRegexes + Constants.OTP_FIXED_LENGTH_REGEX_PATTERNS
+
+        for (regex in allPatterns) {
+            val matchResult = regex.find(messageBody)
+            if (matchResult != null && matchResult.groupValues.size > 1) {
+                val otp = matchResult.groupValues[1]
+                // Add an additional check to ensure the extracted OTP matches the min/max length
+                if (otp.length in minLength..maxLength) {
+                    Log.d(TAG, "OTP extracted: '$otp' using pattern: '${regex.pattern}' from message: '$messageBody'")
+                    return otp
+                } else {
+                    Log.d(TAG, "Skipping extracted string '$otp' from message: '$messageBody' as it does not meet length criteria ($minLength-$maxLength). Pattern: '${regex.pattern}'")
                 }
             }
         }
-        Log.d(TAG, "No valid OTP found in message.")
+        Log.d(TAG, "No OTP found in message: '$messageBody'")
         return null
     }
 
     /**
-     * Checks if the message content contains keywords typically associated with OTPs.
-     * This helps filter out random numbers caught by broad regex patterns.
-     */
-    private fun isLikelyOtpMessage(message: String): Boolean {
-        val lowerMessage = message.lowercase(Locale.getDefault())
-        val otpKeywords = listOf(
-            "otp", "code", "pin", "verification", "verify", "authenticate",
-            "confirm", "login", "security", "use", "enter", "passcode", "one-time"
-        )
-        return otpKeywords.any { lowerMessage.contains(it) }
-    }
-
-    /**
-     * Performs additional checks on the extracted number to determine if it's truly an OTP.
-     * Filters out common non-OTP numbers like phone numbers or financial amounts.
-     */
-    private fun isLikelyOtp(otp: String, message: String): Boolean {
-        val lowerMessage = message.lowercase(Locale.getDefault())
-
-        // Rule 1: Filter out common phone number lengths (adjust as needed for your region)
-        // Assuming OTPs are rarely 10 or 11 digits if they are phone numbers.
-        // This is a heuristic, not foolproof.
-        if (otp.length == 10 || otp.length == 11) {
-            // If it's a 10/11 digit number, check if it's explicitly stated as a phone number
-            val phoneNumberKeywords = listOf("call", "contact", "phone", "tel", "number")
-            if (phoneNumberKeywords.any { lowerMessage.contains(it) }) {
-                return false
-            }
-        }
-
-        // Rule 2: Filter out financial amounts unless an explicit OTP keyword is present.
-        val financeKeywords = listOf("amount", "balance", "credit", "debit", "payment", "rs", "inr", "$", "usd", "eur")
-        val hasFinanceKeyword = financeKeywords.any { lowerMessage.contains(it) }
-        val hasOtpKeyword = listOf("otp", "code", "pin", "verification").any { lowerMessage.contains(it) }
-
-        if (hasFinanceKeyword && !hasOtpKeyword) {
-            Log.d(TAG, "OTP '$otp' rejected: Contains finance keyword without OTP keyword.")
-            return false
-        }
-
-        // Rule 3: Avoid numbers that are part of dates or times if no OTP keyword
-        val dateKeywords = listOf("date", "time", "expires", "valid till")
-        if (dateKeywords.any { lowerMessage.contains(it) } && !hasOtpKeyword) {
-            Log.d(TAG, "OTP '$otp' rejected: Contains date/time keyword without OTP keyword.")
-            return false
-        }
-
-        // Add more heuristics as needed based on observed non-OTP messages
-        return true
-    }
-
-    /**
-     * Forwards the extracted OTP, original message, and sender to the Make.com webhook.
-     * This operation is performed on a background thread.
+     * Forwards the extracted OTP using either webhook or direct email based on user settings.
+     *
      * @param otp The extracted OTP.
-     * @param originalMessage The full original SMS/notification message.
-     * @param sender The sender of the SMS/notification.
+     * @param originalMessage The full original SMS message.
+     * @param sender The sender of the SMS (can be phone number or app name from notification).
      * @param context The application context.
      */
     fun forwardOtpViaMake(otp: String, originalMessage: String, sender: String, context: Context) {
-        Log.d(TAG, "Attempting to forward OTP: '$otp' from '$sender'")
+        val sharedPrefs = context.getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
+        val forwardingMethod = sharedPrefs.getString(Constants.KEY_FORWARDING_METHOD, Constants.FORWARDING_METHOD_WEBHOOK)
 
-        // Create a unique key for this OTP to prevent immediate duplicates
-        val otpKey = "OTP_${otp}_${sender.take(50).replace("[^a-zA-Z0-9]".toRegex(), "")}" // Sanitize sender for key
+        // Use the normalized sender for the cache key to detect cross-source duplicates
+        val normalizedSender = normalizeSender(sender)
+        // Create a unique key for this specific OTP instance to prevent immediate duplicates across forwarding methods.
+        // Round timestamp to a 5-second interval for robustness against minor time differences.
+        val otpKey = "OTP_${otp}_${normalizedSender}_${System.currentTimeMillis() / 5000L}"
 
-        // Perform the duplicate check here, before initiating the network request
         if (wasRecentlyForwarded(otpKey)) {
-            Log.d(TAG, "DUPLICATE DETECTED: OTP '$otp' from '$sender' was already forwarded recently. Skipping.")
-            showNotification(context, "⚠️ Duplicate OTP Skipped", "OTP '$otp' already sent from '$sender'", Constants.OTP_RESULT_CHANNEL_ID)
+            Log.d(TAG, "OTPForwarder: Duplicate OTP '$otp' from original sender '$sender' (normalized to '$normalizedSender') detected. Skipping forwarding.")
+            showNotification(
+                context,
+                "⚠️ Duplicate OTP Skipped",
+                "OTP '$otp' already sent from '$sender'",
+                Constants.SMS_DEBUG_CHANNEL_ID
+            )
+            // No need to send broadcast for skipped duplicates as it wasn't 'newly' forwarded.
             return
         }
 
-        // Mark as forwarded IMMEDIATELY to prevent race conditions from other detection methods
-        recentlyForwardedOtps[otpKey] = System.currentTimeMillis()
+        // Mark this OTP as forwarded in the cache
+        forwardedOtpCache[otpKey] = System.currentTimeMillis()
+        Log.d(TAG, "OTPForwarder: Added OTP '$otp' from original sender '$sender' (normalized to '$normalizedSender') to forwarded cache.")
 
-        executorService.execute {
-            try {
-                val currentTime = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
 
-                val payload = JSONObject().apply {
-                    put("otp", otp)
-                    put("original_message", originalMessage)
-                    put("sender", sender)
-                    put("timestamp", currentTime)
-                    put("device_model", Build.MODEL)
-                    put("device_brand", Build.BRAND)
-                    put("android_version", Build.VERSION.RELEASE)
-                }
+        CoroutineScope(Dispatchers.IO).launch {
+            val deviceModel = Build.MODEL
+            val deviceBrand = Build.BRAND
+            val androidVersion = Build.VERSION.RELEASE
+            val timestamp = System.currentTimeMillis() // Get raw timestamp here
+            val timestampFormatted = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(timestamp))
 
-                Log.d(TAG, "Sending payload to Make.com: $payload")
+            val jsonBody = JSONObject().apply {
+                put("otp", otp)
+                put("original_message", originalMessage)
+                put("sender", sender) // Use original sender for the payload
+                put("timestamp", timestampFormatted)
+                put("device_model", deviceModel)
+                put("device_brand", deviceBrand)
+                put("android_version", androidVersion)
+            }
 
-                val body = RequestBody.create(
-                    "application/json; charset=utf-8".toMediaType(),
-                    payload.toString()
-                )
+            var forwardingSuccessful = false // Flag to track successful forwarding
 
-                val request = Request.Builder()
-                    .url(MAKE_WEBHOOK_URL)
-                    .post(body)
-                    .addHeader("Content-Type", "application/json")
-                    .addHeader("User-Agent", "OTP-Forwarder-Android/${BuildConfig.VERSION_NAME ?: "1.0"}") // Use BuildConfig.VERSION_NAME
-                    .build()
-
-                httpClient.newCall(request).execute().use { response ->
-                    Log.d(TAG, "Make.com Response Code: ${response.code}")
-
-                    val notificationTitle: String
-                    val notificationContent: String
-
-                    if (response.isSuccessful) {
-                        notificationTitle = "✅ OTP Forwarded: $otp"
-                        notificationContent = "From: $sender"
-                        // Update last sent OTP only on success
-                        val prefs = context.getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
-                        prefs.edit().putString(Constants.KEY_LAST_SENT_OTP, otp).apply()
-
-                        // Notify MainActivity about the successful forward
-                        val intent = Intent(Constants.ACTION_OTP_FORWARDED).apply {
-                            putExtra(Constants.EXTRA_FORWARDED_OTP, otp)
-                        }
-                        LocalBroadcastManager.getInstance(context).sendBroadcast(intent)
-
+            when (forwardingMethod) {
+                Constants.FORWARDING_METHOD_WEBHOOK -> {
+                    val webhookUrl = sharedPrefs.getString(Constants.KEY_WEBHOOK_URL, Constants.MAKE_WEBHOOK_URL)
+                    if (webhookUrl.isNullOrEmpty() || webhookUrl == Constants.MAKE_WEBHOOK_URL) {
+                        Log.e(TAG, "OTPForwarder: Webhook URL not configured or is placeholder. Cannot forward via webhook.")
+                        showNotification(
+                            context,
+                            "❌ Webhook Failed",
+                            "Webhook URL not set. Configure in app settings.",
+                            Constants.SMS_DEBUG_CHANNEL_ID
+                        )
+                        // Do not clear the cache entry here. It was a configuration error, not a successful forward.
                     } else {
-                        notificationTitle = "❌ Forward Failed: $otp"
-                        notificationContent = "From: $sender (Code: ${response.code})"
-                        Log.e(TAG, "Failed to forward OTP. Response: ${response.body?.string()}")
+                        forwardingSuccessful = sendToWebhook(webhookUrl, jsonBody.toString(), context)
                     }
-                    showNotification(context, notificationTitle, notificationContent, Constants.OTP_RESULT_CHANNEL_ID)
                 }
+                Constants.FORWARDING_METHOD_DIRECT_EMAIL -> {
+                    val recipientEmail = sharedPrefs.getString(Constants.KEY_RECIPIENT_EMAIL, "")
+                    val senderEmail = sharedPrefs.getString(Constants.KEY_SENDER_EMAIL, "")
+                    val smtpHost = sharedPrefs.getString(Constants.KEY_SMTP_HOST, "")
+                    val smtpPort = sharedPrefs.getInt(Constants.KEY_SMTP_PORT, 587)
+                    val smtpUsername = sharedPrefs.getString(Constants.KEY_SMTP_USERNAME, "")
+                    val smtpPassword = sharedPrefs.getString(Constants.KEY_SMTP_PASSWORD, "") // SECURITY WARNING
 
-            } catch (e: Exception) {
-                Log.e(TAG, "Error forwarding OTP to Make.com", e)
-                showNotification(context, "❌ Error forwarding OTP", e.message ?: "Unknown error", Constants.OTP_RESULT_CHANNEL_ID)
+                    if (recipientEmail.isNullOrEmpty() || senderEmail.isNullOrEmpty() ||
+                        smtpHost.isNullOrEmpty() || smtpUsername.isNullOrEmpty() || smtpPassword.isNullOrEmpty()) {
+                        Log.e(TAG, "OTPForwarder: Incomplete email settings for direct email forwarding.")
+                        showNotification(
+                            context,
+                            "❌ Email Failed",
+                            "Incomplete email settings. Configure in app settings.",
+                            Constants.SMS_DEBUG_CHANNEL_ID
+                        )
+                    } else {
+                        val subject = "OTP from $sender: $otp"
+                        val emailBody = "OTP: $otp\nOriginal Message: $originalMessage\nSender: $sender\nTimestamp: $timestampFormatted\nDevice: $deviceBrand $deviceModel (Android $androidVersion)"
+
+                        forwardingSuccessful = EmailSender.sendEmail(
+                            context = context,
+                            subject = subject,
+                            body = emailBody,
+                            recipient = recipientEmail,
+                            senderEmail = senderEmail,
+                            smtpHost = smtpHost,
+                            smtpPort = smtpPort,
+                            smtpUsername = smtpUsername,
+                            smtpPassword = smtpPassword
+                        )
+                    }
+                }
+                else -> {
+                    Log.e(TAG, "OTPForwarder: Unknown forwarding method: $forwardingMethod")
+                    showNotification(
+                        context,
+                        "❌ Forwarding Error",
+                        "Unknown forwarding method selected. Check app settings.",
+                        Constants.SMS_DEBUG_CHANNEL_ID
+                    )
+                }
+            }
+
+            // Send broadcast ONLY if forwarding was successful
+            if (forwardingSuccessful) {
+                sendOtpForwardedBroadcast(context, otp, sender, timestamp)
+            } else {
+                // If forwarding failed, and it wasn't a duplicate, remove from cache
+                // This allows a retry if the failure was transient (e.g., network error)
+                forwardedOtpCache.remove(otpKey)
+                Log.d(TAG, "OTPForwarder: Removed '$otpKey' from cache due to forwarding failure.")
             }
         }
     }
 
     /**
-     * Centralized helper function to display notifications to the user.
+     * Sends the JSON payload to the specified webhook URL.
+     * Returns true on success, false on failure.
+     */
+    private suspend fun sendToWebhook(url: String, json: String, context: Context): Boolean {
+        val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
+
+        if (mediaType == null) {
+            Log.e(TAG, "OTPForwarder: Failed to create MediaType for JSON.")
+            showNotification(
+                context,
+                "❌ Webhook Error",
+                "Internal error: Invalid media type.",
+                Constants.SMS_DEBUG_CHANNEL_ID
+            )
+            return false
+        }
+
+        val body = RequestBody.create(mediaType, json)
+        val request = Request.Builder()
+            .url(url)
+            .post(body)
+            .build()
+
+        return try {
+            val response = withContext(Dispatchers.IO) { client.newCall(request).execute() } // Execute synchronously in coroutine
+            response.use {
+                if (!it.isSuccessful) {
+                    val errorBody = it.body?.string()
+                    Log.e(TAG, "OTPForwarder: Webhook request failed with code ${it.code}: $errorBody")
+                    showNotification(
+                        context,
+                        "❌ Webhook Failed",
+                        "Server error: ${it.code} - ${errorBody ?: "No error body"}",
+                        Constants.SMS_DEBUG_CHANNEL_ID
+                    )
+                    false
+                } else {
+                    Log.d(TAG, "OTPForwarder: Webhook request successful. Response: ${it.body?.string()}")
+                    showNotification(
+                        context,
+                        "✅ OTP Forwarded (Webhook)",
+                        "OTP sent to webhook successfully.",
+                        Constants.SMS_DEBUG_CHANNEL_ID
+                    )
+                    true
+                }
+            }
+        } catch (e: IOException) {
+            Log.e(TAG, "OTPForwarder: Webhook request failed: ${e.message}", e)
+            showNotification(
+                context,
+                "❌ Webhook Failed",
+                "Network error: ${e.message}",
+                Constants.SMS_DEBUG_CHANNEL_ID
+            )
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "OTPForwarder: Unexpected error during webhook request: ${e.message}", e)
+            showNotification(
+                context,
+                "❌ Webhook Failed",
+                "Unexpected error: ${e.message}",
+                Constants.SMS_DEBUG_CHANNEL_ID
+            )
+            false
+        }
+    }
+
+    /**
+     * Sends a local broadcast indicating that an OTP has been forwarded.
+     */
+    private fun sendOtpForwardedBroadcast(context: Context, otp: String, sender: String, timestamp: Long) {
+        val intent = Intent(Constants.ACTION_OTP_FORWARDED).apply {
+            putExtra(Constants.EXTRA_FORWARDED_OTP, otp)
+            putExtra(Constants.EXTRA_SENDER, sender)
+            putExtra(Constants.EXTRA_TIMESTAMP, timestamp)
+        }
+        LocalBroadcastManager.getInstance(context).sendBroadcast(intent)
+        Log.d(TAG, "OTPForwarder: Sent broadcast for forwarded OTP: $otp from $sender")
+    }
+
+    /**
+     * Displays a notification to the user.
      * @param context The application context.
      * @param title The title of the notification.
-     * @param content The main text content of the notification.
-     * @param channelId The ID of the notification channel to use.
-     * @param notificationId An optional specific ID for the notification. If null, a unique ID based on time will be used.
+     * @param message The message content of the notification.
+     * @param channelId The ID of the notification channel.
      * @param priority The priority of the notification.
+     * @param notificationId A specific ID for the notification. If 0, a unique ID is generated.
      */
     fun showNotification(
         context: Context,
         title: String,
-        content: String,
+        message: String,
         channelId: String,
-        notificationId: Int? = null,
-        priority: Int = NotificationCompat.PRIORITY_DEFAULT
+        priority: Int = NotificationCompat.PRIORITY_DEFAULT,
+        notificationId: Int = 0 // Default to 0, indicating a new ID should be generated
     ) {
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
-        // Create notification channel if it doesn't exist (idempotent)
+        // Ensure the channel exists (important for Android O and above)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channelName = when (channelId) {
-                Constants.FOREGROUND_SERVICE_CHANNEL_ID -> Constants.FOREGROUND_SERVICE_CHANNEL_NAME
-                Constants.OTP_RESULT_CHANNEL_ID -> Constants.OTP_RESULT_CHANNEL_NAME
-                Constants.SMS_DEBUG_CHANNEL_ID -> Constants.SMS_DEBUG_CHANNEL_NAME
-                else -> "General Notifications"
+            val channel = notificationManager.getNotificationChannel(channelId)
+            if (channel == null) {
+                // If channel doesn't exist, create it. This ensures all notifications use valid channels.
+                val defaultChannelName = when (channelId) {
+                    Constants.FOREGROUND_SERVICE_CHANNEL_ID -> "OTP Relay Service"
+                    Constants.SMS_DEBUG_CHANNEL_ID -> "OTP Relay Debug Alerts"
+                    else -> "General Notifications"
+                }
+                val defaultImportance = when (channelId) {
+                    Constants.FOREGROUND_SERVICE_CHANNEL_ID -> NotificationManager.IMPORTANCE_LOW
+                    Constants.SMS_DEBUG_CHANNEL_ID -> NotificationManager.IMPORTANCE_HIGH
+                    else -> NotificationManager.IMPORTANCE_DEFAULT
+                }
+                val newChannel = NotificationChannel(channelId, defaultChannelName, defaultImportance).apply {
+                    description = "Channel for OTP Relay notifications."
+                    // Foreground service channel should be silent
+                    if (channelId == Constants.FOREGROUND_SERVICE_CHANNEL_ID) {
+                        setSound(null, null)
+                        enableVibration(false)
+                    }
+                }
+                notificationManager.createNotificationChannel(newChannel)
+                Log.d(TAG, "OTPForwarder: Created missing notification channel: $channelId")
             }
-            val importance = when (channelId) {
-                Constants.FOREGROUND_SERVICE_CHANNEL_ID -> NotificationManager.IMPORTANCE_LOW // Silent for ongoing service
-                Constants.SMS_DEBUG_CHANNEL_ID -> NotificationManager.IMPORTANCE_LOW // Low for debug messages
-                else -> NotificationManager.IMPORTANCE_DEFAULT // Default for results
-            }
-            val channel = NotificationChannel(channelId, channelName, importance).apply {
-                description = "$channelName for OTP Forwarder app."
-                setShowBadge(false) // Don't show badge for foreground service or debug
-            }
-            notificationManager.createNotificationChannel(channel)
         }
 
-        val notificationBuilder = NotificationCompat.Builder(context, channelId)
-            .setSmallIcon(android.R.drawable.ic_dialog_email) // Generic icon
+        // Use the provided notificationId or generate a unique one
+        val finalNotificationId = if (notificationId != 0) notificationId else System.currentTimeMillis().toInt()
+
+        val builder = NotificationCompat.Builder(context, channelId)
+            .setSmallIcon(android.R.drawable.ic_dialog_info) // Generic info icon
             .setContentTitle(title)
-            .setContentText(content)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(content)) // Allow long text to expand
+            .setContentText(message)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(message)) // Show full message in expanded notification
             .setPriority(priority)
-            .setAutoCancel(true) // Dismiss when tapped
+            .setAutoCancel(true) // Dismiss notification when tapped
 
-        // For foreground service notification, make it ongoing and silent
-        if (channelId == Constants.FOREGROUND_SERVICE_CHANNEL_ID) {
-            notificationBuilder.setOngoing(true).setSilent(true)
+        // Add an intent to open the app when the notification is tapped
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
         }
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            0,
+            intent,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+        )
+        builder.setContentIntent(pendingIntent)
 
-        val finalNotificationId = notificationId ?: System.currentTimeMillis().toInt()
-        notificationManager.notify(finalNotificationId, notificationBuilder.build())
+        notificationManager.notify(finalNotificationId, builder.build())
+        Log.d(TAG, "OTPForwarder: Notification posted - ID: $finalNotificationId, Channel: $channelId, Title: '$title'")
+    }
+
+    /**
+     * Checks if the Notification Listener Service permission is granted for this app.
+     * If not granted, it attempts to open the relevant settings screen.
+     * @param context The application context.
+     * @return True if permission is granted, false otherwise.
+     */
+    fun checkAndRequestNotificationListenerPermission(context: Context): Boolean {
+        val cn = ComponentName(context, OTPNotificationListener::class.java)
+        val flat = Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
+        val isEnabled = flat != null && flat.contains(cn.flattenToString())
+        Log.d(TAG, "OTPForwarder: Notification Listener permission check. Is enabled: $isEnabled")
+
+        if (!isEnabled) {
+            Log.d(TAG, "OTPForwarder: Notification Listener permission not granted. Prompting user.")
+            // Direct user to Notification Access settings
+            val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+                Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+            } else {
+                Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS")
+            }
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) // Required if starting from non-activity context
+            try {
+                context.startActivity(intent)
+                showNotification(
+                    context,
+                    "Notification Access Required",
+                    "Please enable 'OTP Relay' in Notification Access settings to forward OTPs from notifications.",
+                    Constants.SMS_DEBUG_CHANNEL_ID,
+                    priority = NotificationCompat.PRIORITY_HIGH,
+                    notificationId = 999 // Fixed ID for this specific notification
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "OTPForwarder: Failed to open Notification Listener settings: ${e.message}", e)
+                showNotification(
+                    context,
+                    "Failed to Open Settings",
+                    "Please go to Settings > Apps & Notifications > Special app access > Notification access and enable 'OTP Relay'.",
+                    Constants.SMS_DEBUG_CHANNEL_ID,
+                    priority = NotificationCompat.PRIORITY_HIGH,
+                    notificationId = 999
+                )
+            }
+        }
+        return isEnabled
     }
 }
