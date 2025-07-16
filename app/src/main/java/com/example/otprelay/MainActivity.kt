@@ -76,11 +76,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var keywordChipGroup: ChipGroup
     private var smsKeywords: MutableSet<String> = mutableSetOf() // In-memory set of keywords
 
-    // New: Regex Management UI elements
-    private lateinit var regexEditText: EditText
-    private lateinit var addRegexButton: Button
-    private lateinit var regexChipGroup: ChipGroup
-    private var customOtpRegexes: MutableSet<String> = mutableSetOf()
+    // Removed: Custom regex functionality - too complex for end users
 
     // BroadcastReceiver to get updates from OTPService
     private val otpForwardedReceiver = object : BroadcastReceiver() {
@@ -134,15 +130,9 @@ class MainActivity : AppCompatActivity() {
         addKeywordButton = findViewById(R.id.addKeywordButton)
         keywordChipGroup = findViewById(R.id.keywordChipGroup)
 
-        regexEditText = findViewById(R.id.regexEditText)
-        addRegexButton = findViewById(R.id.addRegexButton)
-        regexChipGroup = findViewById(R.id.regexChipGroup)
-
-
         // Load saved preferences
         loadPreferences()
         loadSmsKeywords()
-        loadCustomOtpRegexes()
 
         // Set listeners
         autoForwardSwitch.setOnCheckedChangeListener { _, isChecked ->
@@ -202,15 +192,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        addRegexButton.setOnClickListener { addRegex() }
-        regexEditText.setOnEditorActionListener { _, actionId, _ ->
-            if (actionId == EditorInfo.IME_ACTION_DONE) {
-                addRegex()
-                true
-            } else {
-                false
-            }
-        }
+        // Removed regex functionality
 
         smsPermissionButton.setOnClickListener {
             requestSmsPermissions()
@@ -245,7 +227,6 @@ class MainActivity : AppCompatActivity() {
         updateUiBasedOnPermissions()
         updateServiceStatusUI()
         loadSmsKeywords() // Reload keywords in case they were cleared or changed elsewhere
-        loadCustomOtpRegexes() // Reload custom regexes
     }
 
     override fun onDestroy() {
@@ -325,43 +306,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun addRegex() {
-        val regex = regexEditText.text.toString().trim()
-        if (regex.isNotBlank()) {
-            // Basic regex validation (can be more robust if needed)
-            try {
-                regex.toRegex()
-                if (customOtpRegexes.add(regex)) {
-                    addChipToGroup(regex, regexChipGroup, customOtpRegexes, Constants.KEY_CUSTOM_OTP_REGEXES)
-                    saveCustomOtpRegexes()
-                }
-                regexEditText.text.clear()
-            } catch (e: Exception) {
-                Toast.makeText(this, "Invalid regex pattern: ${e.message}", Toast.LENGTH_LONG).show()
-                Log.e(TAG, "Invalid regex entered: $regex", e)
-            }
-        }
-    }
-
-    private fun loadCustomOtpRegexes() {
-        val sharedPrefs = getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
-        customOtpRegexes = sharedPrefs.getStringSet(Constants.KEY_CUSTOM_OTP_REGEXES, Constants.DEFAULT_OTP_REGEXES.toMutableSet())?.toMutableSet() ?: mutableSetOf()
-        updateRegexChipGroup()
-    }
-
-    private fun saveCustomOtpRegexes() {
-        getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putStringSet(Constants.KEY_CUSTOM_OTP_REGEXES, customOtpRegexes)
-            .apply()
-    }
-
-    private fun updateRegexChipGroup() {
-        regexChipGroup.removeAllViews()
-        customOtpRegexes.forEach { regex ->
-            addChipToGroup(regex, regexChipGroup, customOtpRegexes, Constants.KEY_CUSTOM_OTP_REGEXES)
-        }
-    }
+    // Removed regex management functions - too complex for end users
 
     private fun addChipToGroup(text: String, chipGroup: ChipGroup, set: MutableSet<String>, prefKey: String) {
         val chip = Chip(this).apply {
@@ -542,20 +487,27 @@ class MainActivity : AppCompatActivity() {
     private fun testForwarding() {
         val testMessageBody = "Your OTP code is 123456 for testing."
         val testSender = "TestSender"
-        val testTimestamp = System.currentTimeMillis()
 
         // Get current preferences to simulate how the service would read them
         val sharedPrefs = getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
-        val customRegexes = sharedPrefs.getStringSet(Constants.KEY_CUSTOM_OTP_REGEXES, Constants.DEFAULT_OTP_REGEXES)?.toSet() ?: emptySet()
         val smsKeywords = sharedPrefs.getStringSet(Constants.KEY_SMS_KEYWORDS, Constants.DEFAULT_SMS_KEYWORDS)?.toSet() ?: emptySet()
         val otpMinLength = sharedPrefs.getInt(Constants.KEY_OTP_MIN_LENGTH, Constants.DEFAULT_OTP_MIN_LENGTH)
         val otpMaxLength = sharedPrefs.getInt(Constants.KEY_OTP_MAX_LENGTH, Constants.DEFAULT_OTP_MAX_LENGTH)
 
-        // Attempt to extract OTP using the configured regexes and lengths
+        // Check if test message contains any configured keywords
+        val lowerCaseMessage = testMessageBody.lowercase()
+        val containsKeyword = smsKeywords.any { lowerCaseMessage.contains(it.lowercase()) }
+        
+        if (!containsKeyword) {
+            Toast.makeText(this, "Test message doesn't contain any configured keywords. Add 'otp' or 'code' to keywords.", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        // Attempt to extract OTP using default patterns and configured lengths
         val extractedOtp = OTPForwarder.extractOtpFromMessage(
             testMessageBody,
             this,
-            customRegexes,
+            null, // Use default patterns
             otpMinLength,
             otpMaxLength
         )
@@ -563,7 +515,6 @@ class MainActivity : AppCompatActivity() {
         if (extractedOtp != null) {
             Toast.makeText(this, "Test OTP extracted: $extractedOtp. Attempting to forward...", Toast.LENGTH_LONG).show()
             // Manually call forwardOtp, which will handle the actual sending based on preferences
-            // This bypasses the SMSReceiver/OTPService flow but uses the core forwarding logic
             OTPForwarder.forwardOtp(
                 extractedOtp,
                 testMessageBody,

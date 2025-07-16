@@ -73,11 +73,12 @@ object OTPForwarder {
 
 
     /**
-     * Extracts an OTP from a given message body using a list of regex patterns and configurable length.
+     * Extracts an OTP from a given message body using default regex patterns and configurable length.
+     * Simplified version without custom regex support for better user experience.
      *
      * @param message The full message body (SMS or notification text).
-     * @param context Application context for accessing SharedPreferences.
-     * @param customRegexes A set of custom regex strings provided by the user. If empty, default regexes are used.
+     * @param context Application context (not used in simplified version).
+     * @param customRegexes Deprecated parameter, kept for compatibility but ignored.
      * @param otpMinLength Minimum length for a valid OTP.
      * @param otpMaxLength Maximum length for a valid OTP.
      * @return The extracted OTP string, or null if no OTP is found.
@@ -85,42 +86,34 @@ object OTPForwarder {
     fun extractOtpFromMessage(
         message: String,
         context: Context,
-        customRegexes: Set<String>? = null, // Make this nullable and provide default
+        customRegexes: Set<String>? = null, // Kept for compatibility but ignored
         otpMinLength: Int = Constants.DEFAULT_OTP_MIN_LENGTH,
         otpMaxLength: Int = Constants.DEFAULT_OTP_MAX_LENGTH
     ): String? {
-        val prefs = context.getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
-
-        // Get OTP regexes from preferences, fall back to customRegexes parameter, then default constants
-        val otpRegexes = customRegexes ?: prefs.getStringSet(Constants.KEY_CUSTOM_OTP_REGEXES, null)
-        val regexPatternsToUse = if (!otpRegexes.isNullOrEmpty()) {
-            otpRegexes.map { Pattern.compile(it, Pattern.CASE_INSENSITIVE) }
-        } else {
-            // Use default regexes from Constants if no custom ones are provided or configured
-            Constants.DEFAULT_OTP_REGEXES.map { Pattern.compile(it, Pattern.CASE_INSENSITIVE) }
+        // Use default regex patterns - simplified and user-friendly
+        val regexPatternsToUse = Constants.DEFAULT_OTP_REGEXES.map { 
+            Pattern.compile(it, Pattern.CASE_INSENSITIVE) 
         }
 
-        // Create a general regex for numbers within the configurable length range
-        val generalOtpPattern = Pattern.compile("\\b(\\d{${otpMinLength},${otpMaxLength}})\\b")
-
+        // Try specific patterns first (more accurate)
         for (pattern in regexPatternsToUse) {
             val matcher = pattern.matcher(message)
             if (matcher.find()) {
-                // Ensure the found group actually matches an OTP-like number based on length
                 val potentialOtp = matcher.group(1)
                 if (potentialOtp != null && potentialOtp.length >= otpMinLength && potentialOtp.length <= otpMaxLength) {
-                    Log.d(TAG, "OTP extracted by specific regex: ${pattern.pattern()}")
+                    Log.d(TAG, "OTP extracted by specific pattern: ${pattern.pattern()}")
                     return potentialOtp
                 }
             }
         }
 
-        // If no specific regex matches, try the general number pattern
+        // If no specific pattern matches, try a general number pattern as fallback
+        val generalOtpPattern = Pattern.compile("\\b(\\d{${otpMinLength},${otpMaxLength}})\\b")
         val generalMatcher = generalOtpPattern.matcher(message)
         if (generalMatcher.find()) {
             val potentialOtp = generalMatcher.group(1)
             if (potentialOtp != null && potentialOtp.length >= otpMinLength && potentialOtp.length <= otpMaxLength) {
-                Log.d(TAG, "OTP extracted by general length regex.")
+                Log.d(TAG, "OTP extracted by general length pattern.")
                 return potentialOtp
             }
         }

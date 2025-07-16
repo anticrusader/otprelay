@@ -140,14 +140,12 @@ class OTPNotificationListener : NotificationListenerService() {
             Log.d(TAG, "OTPNotificationListener: Potentially an OTP notification identified.")
 
             // Attempt to extract OTP using the centralized OTPForwarder
-            // Pass context and custom regexes/lengths loaded from preferences
+            // Pass context and configured lengths (using default patterns)
             val sharedPrefs = getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
-            val customOtpRegexes = sharedPrefs.getStringSet(Constants.KEY_CUSTOM_OTP_REGEXES, Constants.DEFAULT_OTP_REGEXES)?.toSet() ?: emptySet()
             val otpMinLength = sharedPrefs.getInt(Constants.KEY_OTP_MIN_LENGTH, Constants.DEFAULT_OTP_MIN_LENGTH)
             val otpMaxLength = sharedPrefs.getInt(Constants.KEY_OTP_MAX_LENGTH, Constants.DEFAULT_OTP_MAX_LENGTH)
 
-
-            val otp = OTPForwarder.extractOtpFromMessage(message, applicationContext, customOtpRegexes, otpMinLength, otpMaxLength)
+            val otp = OTPForwarder.extractOtpFromMessage(message, applicationContext, null, otpMinLength, otpMaxLength)
 
             if (otp != null) {
                 Log.d(TAG, "OTPNotificationListener: OTP '$otp' extracted from notification. Forwarding...")
@@ -155,10 +153,13 @@ class OTPNotificationListener : NotificationListenerService() {
                 processedNotifications[notificationContentHash] = currentTimestamp
                 saveProcessedNotifications() // Persist the updated cache
 
+                // Extract the actual sender from the notification instead of using package name
+                val actualSender = extractSenderFromNotification(title, message, packageName)
+
                 OTPForwarder.forwardOtp(
                     otp,
                     "Notification: $title - $message",
-                    packageName, // Use package name as sender for notifications
+                    actualSender, // Use extracted sender instead of package name
                     applicationContext,
                     OTPForwarder.SourceType.NOTIFICATION.name
                 )
@@ -192,9 +193,9 @@ class OTPNotificationListener : NotificationListenerService() {
         val lowerMessage = message.lowercase(Locale.getDefault())
         val lowerTitle = title?.lowercase(Locale.getDefault()) ?: ""
 
-        // Load configurable keywords and OTP lengths
+        // Load configurable keywords and OTP lengths (unified keyword system)
         val sharedPrefs = getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
-        val otpKeywords = sharedPrefs.getStringSet(Constants.KEY_NOTIFICATION_KEYWORDS, Constants.DEFAULT_SMS_KEYWORDS)?.toSet() ?: emptySet()
+        val otpKeywords = sharedPrefs.getStringSet(Constants.KEY_SMS_KEYWORDS, Constants.DEFAULT_SMS_KEYWORDS)?.toSet() ?: emptySet()
         val smsContextKeywords = sharedPrefs.getStringSet(Constants.KEY_SMS_CONTEXT_KEYWORDS, Constants.DEFAULT_SMS_CONTEXT_KEYWORDS)?.toSet() ?: emptySet()
         val otpMinLength = sharedPrefs.getInt(Constants.KEY_OTP_MIN_LENGTH, Constants.DEFAULT_OTP_MIN_LENGTH)
         val otpMaxLength = sharedPrefs.getInt(Constants.KEY_OTP_MAX_LENGTH, Constants.DEFAULT_OTP_MAX_LENGTH)
@@ -211,21 +212,81 @@ class OTPNotificationListener : NotificationListenerService() {
         val otpNumberRegex = Regex("\\b\\d{${otpMinLength},${otpMaxLength}}\\b")
         val hasOtpNumber = otpNumberRegex.containsMatchIn(lowerMessage)
 
-        val hasOtpKeyword = otpKeywords.any { lowerMessage.contains(it) }
-        val hasSmsContextKeyword = smsContextKeywords.any { lowerMessage.contains(it) || lowerTitle.contains(it) }
+        // Check if message contains any configured keywords (case-insensitive)
+        val hasOtpKeyword = otpKeywords.any { keyword -> 
+            lowerMessage.contains(keyword.lowercase(Locale.getDefault())) || 
+            lowerTitle.contains(keyword.lowercase(Locale.getDefault()))
+        }
+        val hasSmsContextKeyword = smsContextKeywords.any { keyword -> 
+            lowerMessage.contains(keyword.lowercase(Locale.getDefault())) || 
+            lowerTitle.contains(keyword.lowercase(Locale.getDefault()))
+        }
+
+        // Only process notifications that contain configured keywords
+        if (!hasOtpKeyword) {
+            Log.d(TAG, "OTPNotificationListener: Notification does not contain any configured keywords. Skipping.")
+            Log.d(TAG, "OTPNotificationListener: Configured keywords: $otpKeywords")
+            Log.d(TAG, "OTPNotificationListener: Message content: $message")
+            return false
+        }
 
         // A notification is likely an SMS OTP if it meets these criteria:
         // 1. It contains an OTP keyword AND a number within the expected length range.
-        // 2. It contains a "SMS context" keyword (like "message", "bank") AND an OTP keyword AND a number.
-        // 3. The message is not excessively long (typical for OTP SMS, less likely for general app notifications).
-        return (hasOtpKeyword && hasOtpNumber) ||
-                (hasSmsContextKeyword && hasOtpKeyword && hasOtpNumber) ||
-                (hasOtpKeyword && hasOtpNumber && message.length < 250) // Max 250 chars for typical SMS
+        // 2. The message is not excessively long (typical for OTP SMS).
+        return hasOtpKeyword && hasOtpNumber && message.length < 250 // Max 250 chars for typical SMS
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
         // Not strictly needed for this app's core functionality, but useful for debugging.
         Log.d(TAG, "OTPNotificationListener: Notification removed: ${sbn.packageName} - ${sbn.notification.extras.getString(Notification.EXTRA_TITLE)}")
+    }
+
+    /**
+     * Extracts the actual sender from SMS notification instead of using the package name.
+     * For SMS notifications, the sender is usually in the title or can be extracted from the message.
+     */
+    private fun extractSenderFromNotification(title: String?, message: String?, packageName: String): String {
+        // Try to extract sender from title first (most common case)
+        if (!title.isNullOrBlank()) {
+            // Common patterns for SMS notification titles:
+            // "John Doe", "+1234567890", "Bank Alert", etc.
+            
+            // If title looks like a phone number, use it
+            if (title.matches(Regex("^[+]?[0-9\\s\\-()]+$"))) {
+                return title.trim()
+            }
+            
+            // If title is not a generic SMS app name, use it as sender
+            val genericTitles = setOf("message", "messages", "sms", "text message", "new message")
+            if (!genericTitles.contains(title.lowercase().trim())) {
+                return title.trim()
+            }
+        }
+        
+        // Try to extract sender from message content
+        if (!message.isNullOrBlank()) {
+            // Look for patterns like "From: +1234567890" or similar
+            val fromPattern = Regex("(?:from|sender)\\s*:?\\s*([+]?[0-9\\s\\-()]+)", RegexOption.IGNORE_CASE)
+            val fromMatch = fromPattern.find(message)
+            if (fromMatch != null) {
+                return fromMatch.groupValues[1].trim()
+            }
+            
+            // Look for phone numbers at the beginning of the message
+            val phonePattern = Regex("^([+]?[0-9\\s\\-()]{7,15})\\s*[:-]")
+            val phoneMatch = phonePattern.find(message)
+            if (phoneMatch != null) {
+                return phoneMatch.groupValues[1].trim()
+            }
+        }
+        
+        // If we can't extract a specific sender, return a more user-friendly name
+        return when (packageName) {
+            "com.google.android.apps.messaging" -> "Messages (SMS)"
+            "com.android.mms" -> "SMS"
+            "com.samsung.android.messaging" -> "Samsung Messages"
+            else -> "SMS App"
+        }
     }
 
     override fun onDestroy() {

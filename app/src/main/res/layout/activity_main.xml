@@ -464,39 +464,7 @@
                         android:layout_marginTop="8dp"
                         app:chipSpacingHorizontal="8dp"
                         app:chipSpacingVertical="4dp" />
-					<TextView
-    android:layout_width="wrap_content"
-    android:layout_height="wrap_content"
-    android:text="Custom OTP Regexes"
-    android:textStyle="bold"
-    android:layout_marginTop="16dp"/>
-
-<LinearLayout
-    android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:orientation="horizontal"
-    android:gravity="center_vertical">
-
-    <EditText
-        android:id="@+id/regexEditText"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_weight="1"
-        android:hint="Enter custom OTP regex"
-        android:inputType="textNoSuggestions"
-        android:maxLines="1"/>
-
-    <Button
-        android:id="@+id/addRegexButton"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Add Regex"/>
-</LinearLayout>
-<com.google.android.material.chip.ChipGroup
-    android:id="@+id/regexChipGroup"
-    android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:padding="8dp"/>
+					<!-- Removed: Custom OTP Regexes section - too complex for end users -->
 
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>

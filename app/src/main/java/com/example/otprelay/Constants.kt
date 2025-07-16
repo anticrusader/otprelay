@@ -31,11 +31,9 @@ object Constants {
     const val DEFAULT_OTP_MIN_LENGTH = 4
     const val DEFAULT_OTP_MAX_LENGTH = 8 // Common max for OTPs
 
-    // Keys for configurable keywords and regexes
-    const val KEY_SMS_KEYWORDS = "sms_keywords"
-    const val KEY_NOTIFICATION_KEYWORDS = "notification_keywords"
-    const val KEY_SMS_CONTEXT_KEYWORDS = "sms_context_keywords" // For Notification Listener
-    const val KEY_CUSTOM_OTP_REGEXES = "custom_otp_regexes" // User-defined regexes
+    // Keys for configurable keywords (unified for both SMS and notifications)
+    const val KEY_SMS_KEYWORDS = "sms_keywords" // Used for both SMS and notification filtering
+    const val KEY_SMS_CONTEXT_KEYWORDS = "sms_context_keywords" // For Notification Listener context detection
 
     // Default OTP regexes (can be overridden by user in settings)
     val DEFAULT_OTP_REGEXES = setOf(

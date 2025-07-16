@@ -319,23 +319,26 @@ class OTPService : Service() {
     private fun processSms(messageBody: String, sender: String, timestamp: Long, source: String) {
         val sharedPrefs = this.applicationContext.getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
 
-        // Retrieve the keywords and custom regexes from preferences
+        // Retrieve the keywords from preferences
         val smsKeywords = sharedPrefs.getStringSet(Constants.KEY_SMS_KEYWORDS, Constants.DEFAULT_SMS_KEYWORDS)?.toSet() ?: emptySet()
-        val customOtpRegexes = sharedPrefs.getStringSet(Constants.KEY_CUSTOM_OTP_REGEXES, Constants.DEFAULT_OTP_REGEXES)?.toSet() ?: emptySet()
         val otpMinLength = sharedPrefs.getInt(Constants.KEY_OTP_MIN_LENGTH, Constants.DEFAULT_OTP_MIN_LENGTH)
         val otpMaxLength = sharedPrefs.getInt(Constants.KEY_OTP_MAX_LENGTH, Constants.DEFAULT_OTP_MAX_LENGTH)
 
-        // Pre-check with keywords to quickly filter out irrelevant messages
+        // Check if message contains any configured keywords (case-insensitive)
         val lowerCaseMessage = messageBody.lowercase(Locale.getDefault())
-        val containsKeyword = smsKeywords.any { lowerCaseMessage.contains(it) }
+        val containsKeyword = smsKeywords.any { keyword -> 
+            lowerCaseMessage.contains(keyword.lowercase(Locale.getDefault()))
+        }
 
         if (!containsKeyword) {
-            Log.d(TAG, "OTPService: SMS from $sender does not contain configured keywords. Skipping OTP extraction.")
+            Log.d(TAG, "OTPService: SMS from $sender does not contain any configured keywords. Skipping OTP extraction.")
+            Log.d(TAG, "OTPService: Configured keywords: $smsKeywords")
+            Log.d(TAG, "OTPService: Message content: $messageBody")
             return
         }
 
-        // Pass the keywords and custom regexes to extractOtpFromMessage
-        val otp = OTPForwarder.extractOtpFromMessage(messageBody, this.applicationContext, customOtpRegexes, otpMinLength, otpMaxLength)
+        // Extract OTP using default patterns and configured lengths
+        val otp = OTPForwarder.extractOtpFromMessage(messageBody, this.applicationContext, null, otpMinLength, otpMaxLength)
 
         if (otp != null) {
             Log.d(TAG, "OTPService: OTP '$otp' extracted from SMS from $sender (Source: $source). Forwarding...")
